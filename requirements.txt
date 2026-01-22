@@ -1,11 +1,12 @@
 streamlit
 langchain
 langchain-community
-langchain-huggingface
 langchain-groq
 faiss-cpu
 python-docx
 python-dotenv
 huggingface-hub
 sentence-transformers
-docx2txt
+requests
+langchain-text-splitters
+langchain-huggingface

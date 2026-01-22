@@ -1,110 +1,168 @@
 import os
-import sys
+import re
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-# Import các thư viện AI
-from langchain_community.document_loaders import Docx2txtLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings # Dùng thư viện mới chuẩn hơn
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 
-# 1. CẤU HÌNH
-load_dotenv() 
-sys.stdout.reconfigure(encoding="utf-8")
+
+# ==========================================================
+# CONFIG
+# ==========================================================
+load_dotenv()
+print("DEBUG GROQ_API_KEY =", os.getenv("GROQ_API_KEY"))
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+HRM_API_URL = "https://hrm.icss.com.vn/ICSS/api/execute-sql"
+
+if not GROQ_API_KEY:
+    raise RuntimeError("❌ Chưa cấu hình GROQ_API_KEY trong .env")
 
 app = FastAPI(
-    title="ICS Chatbot API",
-    description="API cung cấp thông tin về giải pháp bảo mật VietGuard, AI SOC của ICS.",
+    title="ICS HRM SQL Chatbot API",
+    description="Chatbot AI truy vấn CSDL HRM thông qua SQL Agent + Schema",
     version="1.0"
 )
 
-# Biến toàn cục
-vectorstore = None
-llm = None
-
-class QuestionRequest(BaseModel):
+# ==========================================================
+# SCHEMA INPUT / OUTPUT
+# ==========================================================
+class ChatRequest(BaseModel):
     question: str
 
-class AnswerResponse(BaseModel):
+class ChatResponse(BaseModel):
+    sql: str
+    data: list | dict | None
     answer: str
 
-# 2. KHỞI ĐỘNG SERVER (Load dữ liệu ICS từ input.docx)
-@app.on_event("startup")
-async def startup_event():
-    global vectorstore, llm
-    print("⏳ Đang khởi động hệ thống...")
+# ==========================================================
+# HRM DATABASE SCHEMA (ÉP AI KHÔNG ĐOÁN MÒ)
+# ==========================================================
+HRM_SCHEMA = """
+BẢNG du_an:
+- id (int)
+- ten_du_an (varchar)
+- trang_thai (varchar)
+- ngay_bat_dau (date)
+- ngay_ket_thuc (date)
 
-    # A. Nạp dữ liệu từ input.docx
-    file_path = "data/input.docx"
-    if os.path.exists(file_path):
-        loader = Docx2txtLoader(file_path)
-        docs = loader.load()
-        
-        # Cắt nhỏ văn bản
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks = splitter.split_documents(docs)
-        
-        # Tạo Vector (Dùng CPU để tránh lỗi DLL)
-        print("🔄 Đang xử lý dữ liệu ICS...")
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        vectorstore = FAISS.from_documents(chunks, embeddings)
-        print("✅ Đã nạp dữ liệu ICS thành công!")
-    else:
-        print("❌ Cảnh báo: Không tìm thấy file data/input.docx")
+BẢNG nhanvien:
+- id (int)
+- ho_ten (varchar)
+- phong_ban_id (int)
+- chuc_vu (varchar)
 
-    # B. Khởi tạo LLM (Điền Key trực tiếp ở đây để sửa lỗi)
-    # HÃY DÁN KEY CỦA BẠN VÀO DƯỚI ĐÂY (Trong dấu ngoặc kép)
-    api_key = "" 
-    
-    if not api_key or "gsk_" not in api_key:
-        print("❌ Lỗi: Chưa điền API Key đúng trong file api.py")
-    
-    llm = ChatGroq(
-        model_name="llama-3.3-70b-versatile",
-        temperature=0,
-        api_key=api_key
+BẢNG luong:
+- nhanvien_id (int)
+- luong_co_ban (int)
+- thang (int)
+- nam (int)
+
+BẢNG cham_cong:
+- nhanvien_id (int)
+- ngay (date)
+- gio_vao (time)
+- gio_ra (time)
+
+BẢNG cong_viec:
+- id (int)
+- ten_cong_viec (varchar)
+- nguoi_thuc_hien (int)
+- tien_do (int)
+"""
+
+# ==========================================================
+# LLM
+# ==========================================================
+from core.llm import get_llm
+
+llm = get_llm()
+
+
+# ==========================================================
+# PROMPT ÉP AI VIẾT SQL
+# ==========================================================
+SQL_PROMPT = ChatPromptTemplate.from_template("""
+Bạn là AI chuyên phân tích CSDL HRM.
+
+NHIỆM VỤ:
+- CHỈ dùng các bảng và cột trong SCHEMA
+- CHỈ sinh câu lệnh SQL SELECT
+- KHÔNG được UPDATE / DELETE / INSERT
+- KHÔNG suy đoán bảng hoặc cột không tồn tại
+- KHÔNG giải thích
+
+SCHEMA CSDL:
+{schema}
+
+CÂU HỎI NGƯỜI DÙNG:
+{question}
+
+CHỈ TRẢ VỀ SQL (KHÔNG markdown, KHÔNG text):
+""")
+
+# ==========================================================
+# UTILS
+# ==========================================================
+def validate_sql(sql: str):
+    sql = sql.strip().lower()
+
+    if not sql.startswith("select"):
+        raise HTTPException(status_code=400, detail="❌ Chỉ cho phép SELECT")
+
+    if re.search(r"\b(delete|update|insert|drop|alter|truncate)\b", sql):
+        raise HTTPException(status_code=400, detail="❌ SQL nguy hiểm bị chặn")
+
+    return sql
+
+def execute_sql(sql: str):
+    payload = {"command": sql}
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        res = requests.post(HRM_API_URL, json=payload, headers=headers, timeout=20)
+        if res.status_code != 200:
+            raise HTTPException(status_code=500, detail=res.text)
+        return res.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================================
+# API ENDPOINT
+# ==========================================================
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    # 1. AI sinh SQL
+    chain = SQL_PROMPT | llm
+    sql = chain.invoke({
+        "schema": HRM_SCHEMA,
+        "question": request.question
+    }).content.strip()
+
+    # 2. Validate SQL
+    sql = validate_sql(sql)
+
+    # 3. Gọi HRM API
+    data = execute_sql(sql)
+
+    # 4. Tóm tắt kết quả
+    summary_prompt = f"""
+Dựa trên dữ liệu sau, hãy trả lời ngắn gọn cho người dùng.
+
+DỮ LIỆU:
+{data}
+
+CÂU HỎI:
+{request.question}
+"""
+
+    answer = llm.invoke(summary_prompt).content
+
+    return ChatResponse(
+        sql=sql,
+        data=data,
+        answer=answer
     )
-
-# 3. ENDPOINT XỬ LÝ CHAT
-@app.post("/chat", response_model=AnswerResponse)
-async def chat_endpoint(request: QuestionRequest):
-    global vectorstore, llm
-    
-    if not vectorstore:
-        raise HTTPException(status_code=500, detail="Dữ liệu chưa được nạp.")
-
-    # Tìm kiếm thông tin liên quan
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    docs = retriever.invoke(request.question)
-    context = "\n\n".join([d.page_content for d in docs])
-
-    # Prompt chuyên gia ICS (Dựa trên dữ liệu nguồn)
-    template = """
-    Bạn là trợ lý ảo của Công ty Cổ phần An ninh Mạng Quốc tế (ICS).
-    
-    THÔNG TIN CÔNG TY:
-    - Thành lập: 3/2020. Trụ sở: TP.HCM & Hà Nội [1].
-    - Sản phẩm: VietGuard (Mobile Security), Smart Dashboard, AI SOC [2].
-    - Tiêu chuẩn: ISO 27001 [3].
-    - Website: icss.com.vn [3].
-    
-    YÊU CẦU:
-    Trả lời câu hỏi dựa trên ngữ cảnh (CONTEXT) bên dưới.
-    Nếu không có thông tin, hãy nói: "Xin lỗi, tôi chỉ có thể hỗ trợ thông tin về các dịch vụ của ICS."
-    
-    CONTEXT:
-    {context}
-    
-    CÂU HỎI:
-    {question}
-    """
-    
-    prompt = ChatPromptTemplate.from_template(template)
-    chain = prompt | llm
-    result = chain.invoke({"context": context, "question": request.question})
-
-    return AnswerResponse(answer=result.content)

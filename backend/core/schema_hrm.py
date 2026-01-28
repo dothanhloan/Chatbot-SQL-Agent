@@ -81,7 +81,7 @@ BẢNG du_an:
 - id (int)
 - ten_du_an (varchar)
 - mo_ta (text)
-- trang_thai_du_an (varchar)
+- trang_thai_duan (varchar)
 - muc_do_uu_tien (varchar)
 - nhom_du_an (varchar)
 - phong_ban (varchar)
@@ -180,19 +180,21 @@ BẢNG nhanvien:
 - trang_thai_lam_viec (varchar)
 - ngay_tao (datetime)
 
-BẢNG nhanvienquyen:
+
+
+BẢNG nhanvien_quyen:
 - id (int)
 - nhanvien_id (int)
 - quyen_id (int)
 
-BẢNG nhomtailieu (*):
+BẢNG nhom_tai_lieu (*):
 - id (int)
 - ten_nhom (varchar)
 - mo_ta (text)
 - ngay_tao (datetime)
 - nguoi_tao_id (int)
 
-BẢNG phanquyenchucnang:
+BẢNG phan_quyen_chuc_nang:
 - id (int)
 - quyen_id (int)
 - ten_chuc_nang (varchar)
@@ -204,13 +206,13 @@ BẢNG phanquyenchucnang:
 - ngay_tao (datetime)
 
 
-BẢNG phongban:
+BẢNG phong_ban:
 - id (int)
 - ten_phong (varchar)
 - truong_phong_id (int)
 - ngay_tao (datetime)
 
-BẢNG quytrinhnguoinhan:
+BẢNG quy_trinh_nguoi_nhan:
 - id (int)
 - step_id (int)
 - nhan_id (int)
@@ -221,7 +223,7 @@ BẢNG quyen:
 - ten_quyen (varchar)
 - nhom_quyen (varchar)
 
-BẢNG tailieu:
+BẢNG tai_lieu:
 - id (int)
 - ten_tai_lieu (varchar)
 - mo_ta (text)
@@ -238,7 +240,7 @@ BẢNG tailieu:
 - ngay_tao (datetime)
 - ngay_cap_nhat (datetime)
 
-BẢNG thongbao:
+BẢNG thong_bao:
 - id (int)
 - tieu_de (varchar)
 - noi_dung (text)
@@ -249,7 +251,7 @@ BẢNG thongbao:
 - ngay_tao (datetime)
 - ngay_doc (datetime)
 
-VIEW vdonnghiphepchitiet:
+VIEW v_don_nghi_phep_chi_tiet:
 - id (từ đơn nghỉ phép)
 - nhan_vien_id
 - ho_ten_nhan_vien (từ bảng nhan_vien)

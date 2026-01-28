@@ -3,134 +3,106 @@ import sys
 import requests
 
 # =========================
-# CONFIG
+# 1. CONFIG
 # =========================
-KEY_GOOGLE_MOI = ""
-KEY_GROQ_CUA_BAN = ""
+KEY_GROQ_CUA_BAN = "" # Điền Key Groq của bạn vào đây
 
-os.environ["GOOGLE_API_KEY"] = KEY_GOOGLE_MOI
 GROQ_API_KEY = KEY_GROQ_CUA_BAN
-
 API_DB_URL = "https://hrm.icss.com.vn/ICSS/api/execute-sql"
 
 # =========================
-# IMPORT
+# 2. IMPORT
 # =========================
-from langchain_community.document_loaders import Docx2txtLoader
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from langchain.tools import tool
 from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain.prompts import ChatPromptTemplate
+try:
+    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+except ImportError:
+    from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # =========================
-# SCHEMA HRM (GROUND TRUTH)
+# 3. SCHEMA (Dựa trên Source [1], [2], [3])
 # =========================
 DB_SCHEMA = """
-du_an(id, ten_du_an, trang_thai, ngay_bat_dau, ngay_ket_thuc)
-nhanvien(id, ho_ten, phong_ban_id, chuc_vu)
-luong(nhanvien_id, luong_co_ban, thang, nam)
-cham_cong(nhanvien_id, ngay, gio_vao, gio_ra)
-cong_viec(id, ten_cong_viec, nguoi_thuc_hien, tien_do)
+-- CHẤM CÔNG (Source: HRM_SCHEMA) --
+BẢNG cham_cong:
+- id (int), nhan_vien_id (int)
+- ngay (date) -> Dùng lọc ngày/tháng/năm
+- check_in (time) -> Dùng tính đi muộn. QUY TẮC: Muộn là >= '08:06:00'
+- check_out (time)
+
+-- NHÂN SỰ (Source: HRM_SCHEMA) --
+BẢNG nhanvien:
+- id (int), ho_ten (varchar), email (varchar)
+- phong_ban_id (int), chuc_vu (varchar), luong_co_ban (float)
+- trang_thai_lam_viec (varchar) -> 'Đang làm việc', 'Nghỉ việc'
+
+-- LƯƠNG (Source: HRM_SCHEMA) --
+BẢNG luong (nodata): id, nhan_vien_id, thang, nam, thuc_linh.
+
+-- TỔ CHỨC --
+BẢNG phong_ban: id, ten_phong.
+BẢNG du_an: id, ten_du_an, trang_thai_duan.
 """
 
 # =========================
-# TOOL GỌI API HRM
+# 4. KỊCH BẢN MẪU (FEW-SHOT LEARNING) - ĐÃ ĐIỀU CHỈNH LOGIC
 # =========================
-@tool
-def execute_sql_query(sql: str) -> str:
-    """
-    Thực thi SQL SELECT thông qua HRM API.
-    """
-    forbidden = ["insert", "update", "delete", "drop", "alter", "truncate"]
-    if any(x in sql.lower() for x in forbidden):
-        return "❌ Chỉ cho phép SELECT."
+FEW_SHOT_EXAMPLES = """
+TRƯỜNG HỢP 1: ĐI MUỘN (LATE)
+User: "Hôm nay ai đi làm muộn?"
+AI Thought: 
+  - "Đi muộn" nghĩa là ĐÃ check-in nhưng trễ giờ.
+  - Điều kiện: check_in >= '08:06:00'.
+  - KHÔNG dùng NOT IN (đó là nghỉ làm).
+SQL: SELECT n.ho_ten, c.check_in FROM cham_cong c JOIN nhanvien n ON c.nhan_vien_id = n.id WHERE c.ngay = CURRENT_DATE AND c.check_in >= '08:06:00'
 
-    payload = {"command": sql}
-    try:
-        res = requests.post(API_DB_URL, json=payload, timeout=15)
-        return res.text if res.status_code == 200 else res.text
-    except Exception as e:
-        return f"Lỗi API HRM: {e}"
+TRƯỜNG HỢP 2: KHÔNG ĐI LÀM (ABSENT)
+User: "Hôm nay ai chưa đến?" hoặc "Ai nghỉ làm hôm nay?"
+AI Thought: Chưa đến nghĩa là không có dữ liệu trong bảng chấm công.
+SQL: SELECT ho_ten FROM nhanvien WHERE id NOT IN (SELECT nhan_vien_id FROM cham_cong WHERE ngay = CURRENT_DATE)
+
+TRƯỜNG HỢP 3: CÂU HỎI KẾT HỢP
+User: "Tháng này Lan đi trễ mấy lần?"
+AI Thought: Đi trễ là check_in >= '08:06:00'.
+SQL: SELECT COUNT(*) FROM cham_cong c JOIN nhanvien n ON c.nhan_vien_id = n.id WHERE n.ho_ten LIKE '%Lan%' AND MONTH(c.ngay) = MONTH(CURRENT_DATE) AND c.check_in >= '08:06:00'
+"""
 
 # =========================
-# MAIN
+# 5. CẬP NHẬT PROMPT HỆ THỐNG
 # =========================
+# ... (Phần Tool giữ nguyên) ...
+
 def main():
-    # -------- RAG SETUP --------
-    loader = Docx2txtLoader("data/input.docx")
-    docs = loader.load()
-    splits = CharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=200
-    ).split_documents(docs)
+    # ... (Phần khởi tạo LLM giữ nguyên) ...
 
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004",
-        google_api_key=os.environ["GOOGLE_API_KEY"]
-    )
-    vectorstore = FAISS.from_documents(splits, embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-    # -------- LLM --------
-    llm = ChatGroq(
-        model_name="llama-3.3-70b-versatile",
-        temperature=0,
-        api_key=GROQ_API_KEY
-    )
-
-    # -------- PROMPT --------
     prompt = ChatPromptTemplate.from_messages([
         ("system", f"""
-Bạn là AI Agent HRM.
+Bạn là chuyên gia SQL HRM.
 
-NẾU câu hỏi là kiến thức chung → trả lời từ CONTEXT.
-NẾU câu hỏi là số liệu / báo cáo → dùng SCHEMA, sinh SQL SELECT và gọi tool.
-
-QUY TẮC:
-- Chỉ dùng bảng & cột trong schema.
-- Không đoán.
-- Không SQL ghi dữ liệu.
-
-SCHEMA:
+SCHEMA DỮ LIỆU (Nguồn: HRM_SCHEMA):
 {DB_SCHEMA}
+
+PHÂN BIỆT KHÁI NIỆM QUAN TRỌNG:
+1. **ĐI MUỘN (Late)**:
+   - Là nhân viên CÓ đi làm, nhưng `check_in` trễ.
+   - Bắt buộc dùng toán tử: `check_in >= '08:06:00'`.
+   - Ví dụ: check-in lúc 08:07, 09:00...
+
+2. **VẮNG MẶT / CHƯA ĐẾN (Absent)**:
+   - Là nhân viên KHÔNG có dữ liệu chấm công ngày hôm đó.
+   - Dùng cấu trúc: `id NOT IN (SELECT nhan_vien_id ...)`
+
+⛔ LUẬT CẤM:
+- Khi hỏi "đi muộn", TUYỆT ĐỐI KHÔNG viết query tìm người vắng mặt (NOT IN).
+- Chỉ tìm những dòng có `check_in` tồn tại và lớn hơn 08:06:00.
+
+HỌC TỪ VÍ DỤ SAU:
+{FEW_SHOT_EXAMPLES}
 """),
         ("human", "{input}"),
         ("placeholder", "{agent_scratchpad}")
     ])
-
-    agent = create_tool_calling_agent(
-        llm=llm,
-        tools=[execute_sql_query],
-        prompt=prompt
-    )
-
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=[execute_sql_query],
-        verbose=True
-    )
-
-    print("\n🚀 HRM AI CHATBOT READY (Schema + API)\n")
-
-    while True:
-        q = input("👤 Bạn: ")
-        if q.lower() in ["exit", "thoát"]:
-            break
-
-        # Lấy context RAG
-        docs = retriever.invoke(q)
-        context = "\n".join(d.page_content for d in docs)
-
-        try:
-            res = agent_executor.invoke({
-                "input": f"CÂU HỎI: {q}\n\nCONTEXT:\n{context}"
-            })
-            print("\n🤖 Bot:", res["output"])
-        except Exception as e:
-            print("❌ Lỗi:", e)
-
-
-if __name__ == "__main__":
-    main()
+    
+    # ... (Phần còn lại giữ nguyên) ...

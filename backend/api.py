@@ -2,12 +2,13 @@ import os
 import requests
 from typing import Union, List, Dict, Any
 from dotenv import load_dotenv
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Import LangChain
-from langchain_groq import ChatGroq
+# LangChain - OpenAI
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -16,13 +17,13 @@ from langchain_core.output_parsers import StrOutputParser
 # ==========================================================
 load_dotenv()
 
-# Điền Key Groq của bạn (nếu chưa có trong .env)
-if not os.environ.get("GROQ_API_KEY"):
-    os.environ["GROQ_API_KEY"] = "" 
+# BẮT BUỘC phải có OpenAI API Key
+if not os.environ.get("OPENAI_API_KEY"):
+    raise RuntimeError("❌ Chưa cấu hình OPENAI_API_KEY")
 
 HRM_API_URL = "https://hrm.icss.com.vn/ICSS/api/execute-sql"
 
-app = FastAPI(title="ICS HRM SQL Chatbot API", version="3.0 - All in One")
+app = FastAPI(title="ICS HRM SQL Chatbot API", version="3.0 - OpenAI")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,21 +33,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================================
+# 2. SCHEMA REQUEST / RESPONSE
+# ==========================================================
 class ChatRequest(BaseModel):
     question: str
 
+
 class ChatResponse(BaseModel):
-    sql: str
-    data: Union[List, Dict, Any]
+    sql: Union[str, None]
+    data: Union[List, Dict, Any, None]
     answer: str
 
-# Khởi tạo LLM (Temperature = 0 để tuân thủ luật Logic)
-llm = ChatGroq(
-    model_name="llama-3.3-70b-versatile",
-    temperature=0, 
-    api_key=os.environ.get("GROQ_API_KEY")
-)
 
+# ==========================================================
+# 3. KHỞI TẠO LLM (OPENAI)
+# ==========================================================
+llm = ChatOpenAI(
+    model="gpt-4o-mini",   # ✅ Nhanh – rẻ – ổn cho SQL + RAG
+    temperature=0,
+    max_tokens=600   # đủ cho SQL + trả lời
+)
 # ==========================================================
 # 2. SCHEMA & LUẬT NGHIỆP VỤ (Nguồn: HRM_SCHEMA.docx)
 # ==========================================================
@@ -123,6 +130,114 @@ DANH SÁCH BẢNG VÀ LUẬT NGHIỆP VỤ BẮT BUỘC (DATA TRUTH):
      `ngay_ket_thuc < CURRENT_DATE` (hoặc `han_hoan_thanh < CURRENT_DATE`)
      AND `trang_thai != 'Đã hoàn thành'`.
    - **Lưu ý:** Luôn phải kiểm tra trạng thái. Nếu đã xong (`'Đã hoàn thành'`) thì dù quá ngày cũng không tính là trễ (có thể là xong muộn, nhưng hiện tại không còn treo).
+
+9. **LUẬT TIẾN ĐỘ & LỊCH SỬ (QUAN TRỌNG NHẤT):**
+   - Bảng `cong_viec_tien_do` lưu lịch sử cập nhật (Log). Một việc có nhiều dòng dữ liệu.
+   - **Tra cứu đơn lẻ (1 việc):** Dùng `ORDER BY thoi_gian_cap_nhat DESC LIMIT 1` để lấy % mới nhất.
+   - **Thống kê/Đếm (Nhiều việc):** BẮT BUỘC dùng Sub-query để lọc ngày mới nhất: 
+     `WHERE td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)`.
+   - ⛔ **CẤM:** Tuyệt đối KHÔNG dùng `AVG()` hoặc `SUM()` trên cột `phan_tram`.
+
+10. **LUẬT CHI TIẾT QUY TRÌNH (SUB-TASKS):**
+   - Khi hỏi về "chi tiết", "các bước", "quy trình" của một việc -> Hãy query bảng `cong_viec_quy_trinh` (lấy cột `ten_buoc`, `trang_thai`).
+   - Đừng chỉ lấy mỗi cột `mo_ta` trong bảng `cong_viec` vì nó không đủ chi tiết.
+11. **LUẬT TÍNH TIẾN ĐỘ DỰ ÁN (PROJECT PROGRESS RULE):**
+   - Bảng `du_an` KHÔNG có cột phần trăm hoàn thành.
+   - **Định nghĩa:** Tiến độ dự án = Trung bình cộng (AVG) tiến độ hiện tại của tất cả các công việc (`cong_viec`) thuộc dự án đó.
+   - **Công thức SQL bắt buộc:**
+     1. Lấy tiến độ mới nhất của từng công việc (dùng Sub-query `MAX(thoi_gian_cap_nhat)`).
+     2. Gom nhóm theo dự án (`GROUP BY du_an.id`).
+     3. Tính `AVG(phan_tram)`.
+     4. Nếu cần lọc (ví dụ > 80%), dùng `HAVING AVG(...) > 80`.
+12. **MỐI QUAN HỆ DỰ ÁN - CÔNG VIỆC:**
+   - Liên kết: `du_an.id` = `cong_viec.du_an_id`.
+   - Tiến độ: `cong_viec.id` = `cong_viec_tien_do.cong_viec_id`
+13. **LUẬT TRA CỨU TIẾN ĐỘ AN TOÀN (SAFE JOIN RULE):**
+   - Khi tính toán tiến độ dự án hoặc công việc, hãy ưu tiên dùng **`LEFT JOIN cong_viec_tien_do`**.
+   - Lý do: Có những dự án mới tạo chưa có log tiến độ. Nếu dùng `INNER JOIN` sẽ bị mất dữ liệu.
+   - Xử lý NULL: Sử dụng `COALESCE(AVG(td.phan_tram), 0)` để mặc định là 0% nếu không tìm thấy log.
+14. **LUẬT THỐNG KÊ TRẠNG THÁI DỰ ÁN (PROJECT STATUS STATS):**
+   - Khi người dùng hỏi thống kê số lượng dự án theo "trạng thái" (VD: Đang thực hiện, Đã xong...):
+   - **Không cần tính toán** phức tạp.
+   - Truy vấn trực tiếp bảng `du_an`.
+   - Sử dụng `GROUP BY trang_thai_duan` (Lưu ý: tên cột là `trang_thai_duan`, KHÔNG dùng `trang_thai` vì đó là cột của bảng công việc).
+
+15. **LUẬT TRA CỨU TIẾN ĐỘ DỰ ÁN (PROJECT PROGRESS - ADVANCED):**
+   - **Bối cảnh:** Bảng `du_an` KHÔNG có cột phần trăm.
+   - **Logic:** Tiến độ Dự án = Trung bình cộng (AVG) tiến độ *mới nhất* của tất cả công việc (`cong_viec`) thuộc dự án đó.
+   - **Công thức SQL BẮT BUỘC (Safe Mode):**
+     1. Dùng **`LEFT JOIN`** bảng `cong_viec` và `cong_viec_tien_do` (để không bị mất dự án nếu chưa có log tiến độ).
+     2. Xử lý NULL: Dùng `COALESCE(AVG(td.phan_tram), 0)` để mặc định là 0% nếu chưa có dữ liệu.
+     3. Lọc mới nhất: `AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)`.
+     4. Gom nhóm: `GROUP BY d.id, d.ten_du_an`.
+
+16. **LUẬT DỰ ÁN TẠM NGƯNG (PAUSED PROJECTS):**
+    - Khi truy vấn dự án (đặc biệt là dự án Tạm ngưng/Dừng), người dùng luôn muốn biết **Ai chịu trách nhiệm (Leader)**.
+    - **Logic lấy tên Leader:** 
+      - Bắt buộc JOIN bảng `nhanvien` (alias `nv`).
+      - Điều kiện: `du_an.lead_id = nv.id`.
+      - Lấy cột: `nv.ho_ten`.
+    - **Logic lọc trạng thái:** Dùng `trang_thai LIKE '%Ngưng%'` hoặc `LIKE '%Dừng%'`.
+    - **Logic tiến độ:** Vẫn giữ nguyên công thức tính AVG từ bảng `cong_viec` để biết dự án dừng ở mức nào.
+
+13. **LUẬT HIỆU SUẤT NHÂN SỰ (PERFORMANCE):**
+    - Đánh giá ai làm việc hiệu quả: Dựa trên số lượng công việc đã hoàn thành (`trang_thai` = 'Đã hoàn thành') và so sánh `ngay_hoan_thanh` <= `han_hoan_thanh` (xong trước hạn).
+    - Đánh giá quá tải: Đếm số lượng công việc `trang_thai` = 'Đang thực hiện' của từng người.
+
+14. **LUẬT TÊN CỘT TRẠNG THÁI (STATUS COLUMN NAMES):**
+   - LƯU Ý RẤT QUAN TRỌNG VỀ SCHEMA:
+     + Bảng `cong_viec` dùng cột: **`trang_thai`** [2].
+     + Bảng `du_an` dùng cột: **`trang_thai_duan`** [1].
+   - Tuyệt đối không dùng `du_an.trang_thai` (sẽ gây lỗi SQL).
+
+11. **LUẬT DỰ ÁN TẠM NGƯNG:**
+    - Khi lọc dự án tạm ngưng, dùng điều kiện: `d.trang_thai_du_an LIKE '%Ngưng%'`.
+    - Vẫn tính toán tiến độ trung bình từ `cong_viec` để hiển thị mức độ dở dang.
+
+12. **LUẬT XÁC ĐỊNH CÔNG VIỆC TRỄ HẠN (OVERDUE RULE):**
+    - Một công việc bị coi là TRỄ HẠN khi thỏa mãn 2 điều kiện:
+      1. `trang_thai` KHÁC 'Đã hoàn thành' (Ví dụ: 'Đang thực hiện', 'Mới tạo'...).
+      2. `han_hoan_thanh` < `CURRENT_DATE` (Ngày hiện tại).
+    - Câu lệnh SQL mẫu: `WHERE cv.trang_thai != 'Đã hoàn thành' AND cv.han_hoan_thanh < CURDATE()`.
+
+13. **QUY TẮC ĐẾM SỐ LƯỢNG (COUNT RULE) – BẮT BUỘC:**
+- KÍCH HOẠT KHI câu hỏi chứa các cụm:
+  + "bao nhiêu"
+  + "tổng số"
+  + "có mấy"
+  + "số lượng"
+- MỤC TIÊU:
+  → Trả lời bằng **SỐ LƯỢNG** (không liệt kê danh sách chi tiết).
+- SQL LOGIC BẮT BUỘC:
+  → PHẢI sử dụng hàm:
+    `COUNT(*) AS total`
+- MẪU SQL CHUẨN:
+  ```sql
+  SELECT COUNT(*) AS total
+  FROM <table>;
+
+14. **LUẬT TRA CỨU ĐƠN NGHỈ PHÉP (LEAVE REQUESTS - REAL DATA):**
+    - **Cấu trúc bảng `don_nghi_phep` thực tế:**
+      + Cột ngày: `ngay_bat_dau` và `ngay_ket_thuc` (KHÔNG dùng `tu_ngay`/`den_ngay`).
+      + Khóa ngoại: `nhan_vien_id` (có gạch dưới `_`).
+      + Trạng thái: Giá trị lưu là `'da_duyet'` (không dấu, viết thường).
+    - **Logic tìm người đang nghỉ:**
+      + `CURRENT_DATE` nằm trong khoảng `ngay_bat_dau` và `ngay_ket_thuc`.
+      + Điều kiện: `trang_thai = 'da_duyet'`.
+
+15. **LUẬT TRA CỨU QUỸ PHÉP (LEAVE BALANCE):**
+    - **Cấu trúc bảng `ngay_phep_nam`:**
+      + Khóa ngoại: `nhan_vien_id`.
+      + Cột số liệu: `tong_ngay_phep`, `ngay_phep_da_dung`, `ngay_phep_con_lai`.
+    - **Logic Join:** `ngay_phep_nam.nhan_vien_id = nhanvien.id`.
+
+16. **LUẬT TÌM LÃNH ĐẠO / GIÁM ĐỐC (LEADERSHIP LOOKUP):**
+    - Khi người dùng hỏi: "Giám đốc là ai?", "Ai là sếp?", "CEO của công ty", "Ban lãnh đạo".
+    - **Logic:** Truy vấn bảng `nhanvien`.
+    - **Điều kiện:** Tìm kiếm trong cột `chuc_vu` hoặc `vai_tro`.
+    - **Từ khóa lọc:** Sử dụng `LIKE '%Giám đốc%'`, `LIKE '%CEO%'`, hoặc `LIKE '%Chủ tịch%'`.
+    - **SQL mẫu:** `SELECT ho_ten, chuc_vu, email FROM nhanvien WHERE chuc_vu LIKE '%Giám đốc%' OR chuc_vu LIKE '%CEO%'`.
+    
 SCHEMA CHI TIẾT:
 {HRM_SCHEMA_RAW}
 """
@@ -140,7 +255,11 @@ Bạn là SQL Generation Engine. Nhiệm vụ: Chuyển câu hỏi thành SQL Se
 2. **Luật Đi Muộn:** Bắt buộc `check_in >= '08:06:00'`.
 3. **Luật Vắng Mặt:** Dùng `NOT IN (SELECT...)`.
 4. **An toàn:** Chỉ dùng bảng/cột có trong SCHEMA.
-5. **Ngoài lề:** Nếu câu hỏi không liên quan đến Nhân sự/Dự án (VD: thời tiết, bóng đá...), hãy trả về duy nhất chuỗi: "NO_DATA".
+5. Ngoài lề:
+- Chỉ trả về "NO_DATA" nếu:
+  a) Câu hỏi hoàn toàn KHÔNG liên quan đến HRM / Dự án / Nhân sự
+  b) Không ánh xạ được tới BẤT KỲ bảng nào trong schema
+- Nếu câu hỏi còn mơ hồ nhưng có khả năng liên quan,hãy suy luận hợp lý nhất và sinh SQL an toàn.
 
 HỌC TỪ VÍ DỤ (FEW-SHOT):
 - User: "Hôm nay ai đi muộn?" 
@@ -158,6 +277,134 @@ User: "Lương cơ bản của Nam là bao nhiêu?"
 - User: "Liệt kê các dự án quá hạn và tên người quản lý?"
   -> SQL: SELECT d.ten_du_an, n.ho_ten, d.ngay_ket_thuc FROM du_an d JOIN nhanvien n ON d.lead_id = n.id WHERE d.ngay_ket_thuc < CURRENT_DATE AND d.trang_thai_du_an != 'Đã hoàn thành'
 
+- User: "Tiến độ hiện tại của công việc 'Lên phương án hợp tác với TPX' đến đâu rồi?"
+  -> SQL: SELECT td.phan_tram, td.thoi_gian_cap_nhat FROM cong_viec_tien_do td JOIN cong_viec cv ON td.cong_viec_id = cv.id WHERE cv.ten_cong_viec LIKE '%Lên phương án hợp tác với TPX%' ORDER BY td.thoi_gian_cap_nhat DESC LIMIT 1
+
+- User: "Cho tôi xem chi tiết các bước của việc 'Làm việc với a Bình BIDV'?"
+  -> SQL: SELECT qt.ten_buoc, qt.trang_thai, qt.mo_ta, qt.ngay_ket_thuc FROM cong_viec_quy_trinh qt JOIN cong_viec cv ON qt.cong_viec_id = cv.id WHERE cv.ten_cong_viec LIKE '%Tuyển dụng nhân sự%' ORDER BY qt.ngay_bat_dau ASC
+
+User: "Liệt kê các công việc đã hoàn thành trên 50%?"
+  -> SQL: SELECT cv.ten_cong_viec, td.phan_tram, td.thoi_gian_cap_nhat FROM cong_viec cv JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id WHERE td.phan_tram > 50 AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)
+                                              
+- User: "Có bao nhiêu công việc đã hoàn thành trên 50%?"
+  -> SQL: SELECT COUNT(cv.id) AS so_luong FROM cong_viec cv JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id WHERE td.phan_tram > 50 AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)                        
+
+User: "Thống kê số lượng dự án theo từng trạng thái?"
+  -> SQL: SELECT trang_thai_du_an, COUNT(id) FROM du_an GROUP BY trang_thai_du_an
+                                              
+User: "Liệt kê những dự án đã hoàn thành trên 80%?"
+  -> SQL: SELECT d.ten_du_an, AVG(td.phan_tram) as tien_do_tb FROM du_an d JOIN cong_viec cv ON d.id = cv.du_an_id JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id WHERE td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id) GROUP BY d.id, d.ten_du_an HAVING AVG(td.phan_tram) > 80          
+
+ User: "Có bao nhiêu dự án có tiến độ dưới 50%?"
+  -> SQL: SELECT COUNT(*) as so_luong FROM (SELECT d.id FROM du_an d JOIN cong_viec cv ON d.id = cv.du_an_id JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id WHERE td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id) GROUP BY d.id HAVING AVG(td.phan_tram) < 50) as subquery
+
+- User: "Liệt kê các dự án có tiến độ dưới 50%?"
+  -> SQL: SELECT d.ten_du_an, AVG(td.phan_tram) as tien_do_trung_binh FROM du_an d JOIN cong_viec cv ON d.id = cv.du_an_id JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id WHERE td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id) GROUP BY d.id, d.ten_du_an HAVING AVG(td.phan_tram) < 50                                              
+                                              
+     
+
+- User: "Tiến độ dự án 'Database Mobifone' hiện tại là bao nhiêu?"
+  -> SQL: SELECT d.ten_du_an, COALESCE(AVG(td.phan_tram), 0) as phan_tram_hoan_thanh 
+          FROM du_an d 
+          LEFT JOIN cong_viec cv ON d.id = cv.du_an_id 
+          LEFT JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id 
+          AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)
+          WHERE d.ten_du_an LIKE '%Database Mobifone%'
+          GROUP BY d.id, d.ten_du_an                                            
+
+- User: "Thống kê số lượng dự án theo từng trạng thái?"
+  -> SQL: SELECT trang_thai_duan, COUNT(id) as so_luong FROM du_an GROUP BY trang_thai_duan
+
+- User: "Có bao nhiêu dự án đang ở trạng thái 'Đang thực hiện'?"
+  -> SQL: SELECT COUNT(id) as so_luong FROM du_an WHERE trang_thai_du_an LIKE '%Đang thực hiện%'                                                                                          
+
+- User: "Những dự án nào đang bị tạm ngưng và ai là quản lý?"
+  -> SQL: SELECT d.ten_du_an, d.trang_thai, COALESCE(AVG(td.phan_tram), 0) as tien_do_luc_dung, nv.ho_ten as quan_ly_du_an
+          FROM du_an d 
+          LEFT JOIN cong_viec cv ON d.id = cv.du_an_id 
+          LEFT JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id 
+          AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)
+          LEFT JOIN nhanvien nv ON d.lead_id = nv.id
+          WHERE d.trang_thai LIKE '%Ngưng%' OR d.trang_thai LIKE '%Dừng%'
+          GROUP BY d.id, d.ten_du_an, d.trang_thai, nv.ho_ten
+
+# --- Kịch bản: Hỏi thông tin Lead của một dự án cụ thể ---
+- User: "Ai đang phụ trách dự án 'Oracle Cloud' và tiến độ thế nào?"
+  -> SQL: SELECT d.ten_du_an, nv.ho_ten as lead_du_an, nv.email, COALESCE(AVG(td.phan_tram), 0) as tien_do
+          FROM du_an d 
+          LEFT JOIN nhanvien nv ON d.lead_id = nv.id
+          LEFT JOIN cong_viec cv ON d.id = cv.du_an_id 
+          LEFT JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id 
+          AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)
+          WHERE d.ten_du_an LIKE '%Oracle Cloud%'
+          GROUP BY d.id, d.ten_du_an, nv.ho_ten, nv.email   
+
+- User: "Top 5 nhân viên hoàn thành nhiều công việc nhất trong tháng này?"
+  -> SQL: SELECT nv.ho_ten, COUNT(cv.id) as so_viec_hoan_thanh, pb.ten_phong
+          FROM nhanvien nv 
+          JOIN cong_viec_nguoi_nhan cvnn ON nv.id = cvnn.nhan_vien_id 
+          JOIN cong_viec cv ON cvnn.cong_viec_id = cv.id 
+          JOIN phong_ban pb ON nv.phong_ban_id = pb.id
+          WHERE cv.trang_thai = 'Đã hoàn thành' AND MONTH(cv.ngay_hoan_thanh) = MONTH(CURRENT_DATE())
+          GROUP BY nv.id, nv.ho_ten, pb.ten_phong
+          ORDER BY so_viec_hoan_thanh DESC LIMIT 5
+
+- User: "Thống kê khối lượng công việc đang chạy theo từng phòng ban?"
+  -> SQL: SELECT pb.ten_phong, COUNT(cv.id) as so_luong_viec_dang_lam 
+          FROM phong_ban pb 
+          JOIN cong_viec cv ON pb.id = cv.phong_ban_id 
+          WHERE cv.trang_thai = 'Đang thực hiện' 
+          GROUP BY pb.ten_phong 
+          ORDER BY so_luong_viec_dang_lam DESC
+
+- User: "Những dự án nào đang bị tạm ngưng và ai là quản lý?"
+  -> SQL: SELECT d.ten_du_an, d.trang_thai_duan, COALESCE(AVG(td.phan_tram), 0) as tien_do_luc_dung, nv.ho_ten as quan_ly_du_an
+          FROM du_an d 
+          LEFT JOIN cong_viec cv ON d.id = cv.du_an_id 
+          LEFT JOIN cong_viec_tien_do td ON cv.id = td.cong_viec_id 
+          AND td.thoi_gian_cap_nhat = (SELECT MAX(thoi_gian_cap_nhat) FROM cong_viec_tien_do WHERE cong_viec_id = cv.id)
+          LEFT JOIN nhanvien nv ON d.lead_id = nv.id
+          WHERE d.trang_thai_duan LIKE '%Ngưng%' OR d.trang_thai_duan LIKE '%Dừng%'
+          GROUP BY d.id, d.ten_du_an, d.trang_thai_duan, nv.ho_ten
+
+- User: "Thống kê số lượng dự án theo từng trạng thái?"
+  -> SQL: SELECT trang_thai_duan, COUNT(id) as so_luong FROM du_an GROUP BY trang_thai_duan                                              
+
+- User: "Kiểm tra xem Trần Đình Nam có công việc nào đang bị trễ hạn không?"
+  -> SQL: SELECT cv.ten_cong_viec, cv.han_hoan_thanh, cv.trang_thai, nv.ho_ten
+          FROM cong_viec cv
+          JOIN cong_viec_nguoi_nhan cvnn ON cv.id = cvnn.cong_viec_id
+          JOIN nhanvien nv ON cvnn.nhan_vien_id = nv.id
+          WHERE nv.ho_ten LIKE '%Trần Đình Nam%'
+          AND cv.trang_thai != 'Đã hoàn thành' 
+          AND cv.han_hoan_thanh < CURRENT_DATE
+
+
+- User: "Liệt kê các công việc đã làm xong của nhân viên mã số 24?"
+  -> SQL: SELECT cv.ten_cong_viec, cv.ngay_hoan_thanh, cv.muc_do_uu_tien
+          FROM cong_viec cv
+          JOIN cong_viec_nguoi_nhan cvnn ON cv.id = cvnn.cong_viec_id
+          WHERE cvnn.nhan_vien_id = 24
+          AND cv.trang_thai = 'Đã hoàn thành'
+
+
+- User: "Danh sách công việc và tình trạng hạn chót của dự án Web HRM?"
+  -> SQL: SELECT cv.ten_cong_viec, nv.ho_ten as nguoi_lam, cv.han_hoan_thanh, cv.trang_thai,
+                 CASE 
+                    WHEN cv.trang_thai != 'Đã hoàn thành' AND cv.han_hoan_thanh < CURRENT_DATE THEN 'Trễ hạn'
+                    ELSE 'Đúng hạn/Đang chạy'
+                 END as tinh_trang_han
+          FROM cong_viec cv
+          JOIN cong_viec_nguoi_nhan cvnn ON cv.id = cvnn.cong_viec_id
+          JOIN nhanvien nv ON cvnn.nhan_vien_id = nv.id
+          JOIN du_an d ON cv.du_an_id = d.id
+          WHERE d.ten_du_an LIKE '%Web HRM%'         
+
+- User: "Hôm nay ai đang nghỉ phép?" 
+  -> SQL: SELECT nv.ho_ten, dnp.ly_do FROM don_nghi_phep dnp JOIN nhanvien nv ON dnp.nhan_vien_id = nv.id WHERE CURRENT_DATE BETWEEN dnp.ngay_bat_dau AND dnp.ngay_ket_thuc AND dnp.trang_thai = 'da_duyet'
+- User: "Nguyễn Tấn Dũng còn bao nhiêu phép?"
+  -> SQL: SELECT nv.ho_ten, np.ngay_phep_con_lai FROM ngay_phep_nam np JOIN nhanvien nv ON np.nhan_vien_id = nv.id WHERE nv.ho_ten LIKE '%Nguyễn Tấn Dũng%' AND np.nam = YEAR(CURRENT_DATE)
+- User: "Giám đốc công ty là ai?" -> SQL: SELECT ho_ten, chuc_vu, email, so_dien_thoai FROM nhanvien WHERE chuc_vu LIKE '%Giám đốc%' OR chuc_vu LIKE '%CEO%' OR chuc_vu LIKE '%General Manager%'
 SCHEMA:
 {schema}
 
@@ -177,16 +424,45 @@ THÔNG TIN:
 - Dữ liệu nhận được: {data}
 
 YÊU CẦU TRẢ LỜI:
-1. Nếu có dữ liệu: Trả lời thẳng vào vấn đề. Liệt kê danh sách nếu cần.
-2. **QUAN TRỌNG - NẾU DỮ LIỆU RỖNG (Empty List/Null):**
-   - Đừng nói "Không tìm thấy dữ liệu".
-   - Hãy trả lời dựa trên ngữ cảnh câu hỏi.
-   - Ví dụ: Hỏi "Ai đi muộn?", Data=[], Trả lời: "Tuyệt vời! Hôm nay không có nhân viên nào đi làm muộn."
-   - Ví dụ: Hỏi "Ai nghỉ làm?", Data=[], Trả lời: "Hôm nay toàn bộ nhân viên đều đi làm đầy đủ."
 
-GIỌNG ĐIỆU: Tự nhiên, thân thiện nhưng chuyên nghiệp.
+1. Nếu dữ liệu KHÔNG rỗng:
+   - Trả lời thẳng vào vấn đề
+   - Liệt kê đầy đủ danh sách nếu có nhiều bản ghi
+
+2. Nếu dữ liệu rỗng (Empty List hoặc Null):
+   - Không nói "Không tìm thấy dữ liệu"
+   - Được phép suy luận tích cực dựa trên logic nghiệp vụ thông thường
+   - Áp dụng cho các câu hỏi kiểm tra trạng thái
+     (ví dụ: đi muộn, nghỉ làm, trễ hạn, chưa hoàn thành)
+   - Ví dụ:
+     + "Ai đi muộn?" → "Tuyệt vời! Hôm nay không có nhân viên nào đi muộn."
+     + "Ai nghỉ làm?" → "Hôm nay toàn bộ nhân viên đều đi làm đầy đủ."
+
+3. Với dữ liệu thống kê (COUNT, SUM, AVG):
+   - Nếu dữ liệu là một con số, đó chính là câu trả lời
+   - Trả lời trực tiếp, không nói thiếu thông tin
+
+4. Khi SQL đã có điều kiện lọc:
+   - Mặc định TẤT CẢ bản ghi trả về đều thỏa mãn điều kiện
+   - Không cần suy đoán thêm từ phía AI
+
+5. TRUNG THỰC VỚI DỮ LIỆU (DATA FIDELITY – BẮT BUỘC):
+   - Không được tự ý loại bỏ bất kỳ bản ghi nào
+   - Không được bỏ qua các giá trị 0 (0% tiến độ là thông tin hợp lệ)
+   - SQL trả về gì → câu trả lời phải phản ánh đúng như vậy
+
+6. QUY TẮC ĐỊNH DẠNG (BẮT BUỘC):
+  - TUYỆT ĐỐI KHÔNG dùng Markdown in đậm (**).
+  - KHÔNG dùng **text** trong mọi trường hợp.
+  - Chỉ trả lời bằng văn bản thường.
+  - Nếu cần liệt kê → dùng dấu "-" ở đầu dòng.
+GIỌNG ĐIỆU:
+Tự nhiên, thân thiện, chuyên nghiệp, giống trợ lý nội bộ doanh nghiệp.
+
 TRẢ LỜI:
 """)
+
+
 # ==========================================================
 # 4. HELPER FUNCTIONS (Xử lý & Gọi API)
 # ==========================================================
@@ -246,7 +522,7 @@ async def chat_endpoint(req: ChatRequest):
             return {
                 "sql": None,
                 "data": None,
-                "answer": "Xin lỗi. Tôi không có dữ liệu về vấn đề này! 😅"
+                "answer": "Xin lỗi. Tôi không có dữ liệu về vấn đề này!"
             }
 
         # BƯỚC 2: CHẠY SQL

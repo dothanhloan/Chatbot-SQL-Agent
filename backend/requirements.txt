@@ -10,3 +10,7 @@ sentence-transformers
 requests
 langchain-text-splitters
 langchain-huggingface
+uvicorn
+fastapi
+langchain-openai
+pydantic

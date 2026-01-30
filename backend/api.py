@@ -1,4 +1,5 @@
 import os
+import uuid
 import requests
 from typing import Union, List, Dict, Any
 from dotenv import load_dotenv
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from docx import Document
 
 # LangChain - OpenAI
 from langchain_openai import ChatOpenAI
@@ -33,6 +35,135 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Tạo thư mục lưu file tạm
+EXPORT_DIR = "./static/reports"
+if not os.path.exists(EXPORT_DIR):
+    os.makedirs(EXPORT_DIR)
+
+from docx.shared import Inches, Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from datetime import datetime
+
+def create_word_report(data, title="BÁO CÁO HRM", filename_prefix="report", question="", summary=""):
+    """Sinh file .docx từ dữ liệu SQL - Định dạng báo cáo khoa học"""
+    if not data: return None
+    
+    # Đảm bảo data là list
+    if isinstance(data, dict):
+        data = [data]
+    
+    # 1. Khởi tạo file Word
+    doc = Document()
+    
+    # === PHẦN TIÊU ĐỀ ===
+    title_para = doc.add_heading(title, 0)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Thêm đường kẻ và thông tin thời gian
+    subtitle = doc.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = subtitle.add_run(f"Ngày xuất: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    run.font.size = Pt(10)
+    run.font.color.rgb = RGBColor(128, 128, 128)
+    
+    doc.add_paragraph()  # Khoảng trống
+    
+    # === PHẦN CÂU HỎI ===
+    if question:
+        doc.add_heading("1. Yêu cầu truy vấn", level=1)
+        q_para = doc.add_paragraph()
+        q_run = q_para.add_run(f'"{question}"')
+        q_run.font.italic = True
+        q_run.font.size = Pt(11)
+        doc.add_paragraph()
+    
+    # === PHẦN TÓM TẮT KẾT QUẢ ===
+    if summary:
+        doc.add_heading("2. Tóm tắt kết quả", level=1)
+        summary_para = doc.add_paragraph(summary)
+        summary_para.paragraph_format.space_after = Pt(12)
+        doc.add_paragraph()
+    
+    # === PHẦN BẢNG DỮ LIỆU CHI TIẾT ===
+    section_num = 3 if question and summary else (2 if question or summary else 1)
+    doc.add_heading(f"{section_num}. Dữ liệu chi tiết ({len(data)} bản ghi)", level=1)
+    
+    # Lấy headers từ keys của dòng đầu tiên
+    headers = list(data[0].keys())
+    
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = 'Table Grid'
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    
+    # Ghi header với định dạng đẹp
+    hdr_cells = table.rows[0].cells
+    for i, h in enumerate(headers):
+        hdr_cells[i].text = str(h).upper().replace('_', ' ')
+        # Định dạng header
+        for paragraph in hdr_cells[i].paragraphs:
+            for run in paragraph.runs:
+                run.font.bold = True
+                run.font.size = Pt(10)
+        
+    # Ghi dữ liệu
+    for item in data:
+        row_cells = table.add_row().cells
+        for i, h in enumerate(headers):
+            cell_value = item.get(h, '')
+            row_cells[i].text = str(cell_value) if cell_value is not None else ''
+            # Định dạng cell
+            for paragraph in row_cells[i].paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(9)
+    
+    doc.add_paragraph()
+    
+    # === PHẦN FOOTER ===
+    footer_para = doc.add_paragraph()
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer_run = footer_para.add_run("─" * 50)
+    footer_run.font.color.rgb = RGBColor(200, 200, 200)
+    
+    footer_info = doc.add_paragraph()
+    footer_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    info_run = footer_info.add_run("Báo cáo được tạo tự động bởi ICS HRM Chatbot")
+    info_run.font.size = Pt(9)
+    info_run.font.color.rgb = RGBColor(128, 128, 128)
+            
+    # 3. Lưu file
+    filename = f"{filename_prefix}_{uuid.uuid4().hex[:6]}.docx"
+    filepath = os.path.join(EXPORT_DIR, filename)
+    doc.save(filepath)
+    
+    return filepath
+
+def create_pdf_report(data, title="BAO CAO HRM", filename_prefix="report"):
+    """Sinh file .pdf từ dữ liệu SQL"""
+    if not data: return None
+
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Lưu ý: FPDF mặc định không hỗ trợ tiếng Việt Unicode tốt trừ khi add font ngoài.
+    # Ở đây ta dùng font chuẩn Arial (sẽ mất dấu tiếng Việt nếu không config thêm font)
+    pdf.set_font("Arial", size=12)
+    
+    pdf.cell(200, 10, txt=title, ln=1, align='C')
+    
+    # Ghi dữ liệu dòng
+    for item in data:
+        row_str = " | ".join([f"{str(v)}" for k,v in item.items()])
+        # Encode để tránh lỗi ký tự lạ
+        safe_str = row_str.encode('latin-1', 'replace').decode('latin-1') 
+        pdf.cell(0, 10, txt=safe_str, ln=1)
+        
+    filename = f"{filename_prefix}_{uuid.uuid4().hex[:6]}.pdf"
+    filepath = os.path.join(EXPORT_DIR, filename)
+    pdf.output(filepath)
+    
+    return filepath
+
 # ==========================================================
 # 2. SCHEMA REQUEST / RESPONSE
 # ==========================================================
@@ -44,6 +175,7 @@ class ChatResponse(BaseModel):
     sql: Union[str, None]
     data: Union[List, Dict, Any, None]
     answer: str
+    download_url: Union[str, None] = None
 
 
 # ==========================================================
@@ -243,7 +375,130 @@ SCHEMA CHI TIẾT:
 """
 
 # ==========================================================
-# 3. PROMPTS (Kỹ thuật Prompt Engineering)
+import pandas as pd
+import re
+from langchain_core.prompts import PromptTemplate
+# Nhớ import các hàm tạo file chúng ta đã viết ở bước trước
+# from report_generator import create_word_report, create_pdf_report (hoặc để chung file cũng được)
+
+# --- 1. HÀM SINH SQL TỪ LLM ---
+def generate_sql_from_llm(question):
+    """
+    Gửi Schema và câu hỏi cho AI để nhận lại câu lệnh SQL
+    """
+    template = f"""
+    {HRM_SCHEMA_ENHANCED}
+    
+    Dựa trên quy tắc và schema trên, hãy viết câu lệnh SQL để trả lời câu hỏi: "{question}"
+    
+    Yêu cầu:
+    - Chỉ trả về duy nhất câu lệnh SQL. 
+    - Không giải thích, không markdown (```sql).
+    - Nếu cần xuất file, hãy lấy càng nhiều cột chi tiết càng tốt.
+    """
+    
+    # Giả sử bạn đã khởi tạo biến 'llm' (OpenAI/Google Gemini) ở đầu file
+    # response = llm.invoke(template) 
+    # return response.content.strip().replace("```sql", "").replace("```", "")
+    
+    # [CODE MẪU CHO LANGCHAIN]:
+    prompt = PromptTemplate.from_template(template)
+    chain = prompt | llm 
+    sql = chain.invoke({})
+    
+    # Làm sạch chuỗi SQL (xóa markdown thừa nếu có)
+    sql_clean = sql.strip().replace("```sql", "").replace("```", "").strip()
+    return sql_clean
+
+# --- 2. HÀM TÓM TẮT KẾT QUẢ (NÓI CHUYỆN VỚI SẾP) ---
+def generate_natural_response(question, data):
+    """
+    AI đọc dữ liệu SQL và trả lời Sếp bằng tiếng Việt tự nhiên
+    """
+    if not data:
+        return "Thưa sếp, em đã tìm trong hệ thống nhưng không thấy dữ liệu nào phù hợp ạ."
+        
+    data_preview = str(data[:10]) # Chỉ đưa 10 dòng đầu cho AI đọc để tiết kiệm token
+    
+    prompt = f"""
+    Câu hỏi của Sếp: "{question}"
+    Dữ liệu tìm được từ Database: {data_preview}
+    
+    Hãy đóng vai trợ lý ảo chuyên nghiệp, trả lời ngắn gọn, đi vào trọng tâm.
+    Nếu dữ liệu là danh sách dài, hãy chỉ tóm tắt các con số quan trọng (Tổng số, Top đầu...).
+    """
+    
+    return llm.invoke(prompt).content
+
+# --- 3. HÀM XỬ LÝ CHÍNH (MAIN HANDLER) ---
+def handle_query(question):
+    """
+    Hàm này sẽ được ui.py gọi.
+    Input: Câu hỏi của user.
+    Output: Dictionary chứa nội dung trả lời và thông tin file (nếu có).
+    """
+    print(f"DEBUG: Nhận câu hỏi: {question}")
+    
+    try:
+        # BƯỚC 1: AI Dịch câu hỏi sang SQL
+        sql_query = generate_sql_from_llm(question)
+        print(f"DEBUG: SQL Generated: {sql_query}")
+        
+        # BƯỚC 2: Chạy SQL lấy dữ liệu thô
+        # (Giả sử bạn đã có hàm execute_sql_query kết nối DB)
+        raw_data = execute_sql_query(sql_query) 
+        
+        # Nếu không có dữ liệu hoặc lỗi
+        if isinstance(raw_data, str) and "Error" in raw_data:
+            return {
+                "type": "text", 
+                "content": f"Hệ thống gặp lỗi khi truy vấn: {raw_data}"
+            }
+        
+        if not raw_data:
+            return {
+                "type": "text", 
+                "content": "Dạ em kiểm tra thì không thấy dữ liệu nào khớp với yêu cầu của Sếp ạ."
+            }
+
+        # BƯỚC 3: PHÂN TÍCH Ý ĐỊNH XUẤT FILE
+        # Kiểm tra xem Sếp có đòi file không
+        q_lower = question.lower()
+        export_needed = False
+        file_path = None
+        file_format = None
+        
+        if "word" in q_lower or "docx" in q_lower or "văn bản" in q_lower:
+            export_needed = True
+            file_format = "docx"
+            # Gọi hàm tạo Word (đã viết ở bước trước)
+            file_path = create_word_report(raw_data, title="BÁO CÁO HRM", filename_prefix="baocao")
+            
+        elif "pdf" in q_lower or "xuất file" in q_lower: # Mặc định xuất PDF nếu nói chung chung
+            export_needed = True
+            file_format = "pdf"
+            # Gọi hàm tạo PDF
+            file_path = create_pdf_report(raw_data, title="BAO CAO HRM", filename_prefix="baocao")
+
+        # BƯỚC 4: TRẢ KẾT QUẢ VỀ UI
+        if export_needed and file_path:
+            return {
+                "type": "file",
+                "content": f"Dạ, em đã trích xuất xong dữ liệu Sếp cần ({len(raw_data)} dòng). Mời Sếp tải báo cáo bên dưới ạ:",
+                "path": file_path,
+                "format": file_format
+            }
+        else:
+            # Nếu không xuất file, nhờ AI tóm tắt bằng lời
+            summary = generate_natural_response(question, raw_data)
+            return {
+                "type": "text",
+                "content": summary
+            }
+
+    except Exception as e:
+        print(f"ERROR: {str(e)}")
+        return {"type": "text", "content": "Xin lỗi Sếp, hệ thống đang gặp chút trục trặc kỹ thuật."}
 # ==========================================================
 
 # --- PROMPT 1: SINH SQL (Kèm Few-Shot Learning) ---
@@ -464,6 +719,32 @@ TRẢ LỜI:
 
 
 # ==========================================================
+# 4.5. DOWNLOAD FILE ENDPOINT
+# ==========================================================
+from fastapi.responses import FileResponse
+import os
+
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    """Serve exported files (docx/pdf) for download"""
+    # Security: Validate filename to prevent directory traversal
+    if "../" in filename or "..\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    filepath = os.path.join(EXPORT_DIR, filename)
+    
+    # Check if file exists
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Return file for download
+    return FileResponse(
+        filepath,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=filename
+    )
+
+# ==========================================================
 # 4. HELPER FUNCTIONS (Xử lý & Gọi API)
 # ==========================================================
 def validate_sql(sql: str) -> str:
@@ -488,7 +769,7 @@ def execute_sql_api(sql: str) -> Any:
 
     try:
         payload = {"command": sql}
-        res = requests.post(HRM_API_URL, json=payload, timeout=15)
+        res = requests.post(HRM_API_URL, json=payload, timeout=30)
         
         if res.status_code == 200:
             try:
@@ -519,37 +800,59 @@ async def chat_endpoint(req: ChatRequest):
 
         # Nếu AI phát hiện câu hỏi ngoài lề (thời tiết, bóng đá...)
         if "NO_DATA" in sql:
-            return {
-                "sql": None,
-                "data": None,
-                "answer": "Xin lỗi. Tôi không có dữ liệu về vấn đề này!"
-            }
+            return ChatResponse(
+                sql=None,
+                data=None,
+                answer="Xin lỗi. Tôi không có dữ liệu về vấn đề này!",
+                download_url=None
+            )
 
         # BƯỚC 2: CHẠY SQL
         if not sql:
             data_result = None
             final_answer = "Xin lỗi, tôi không thể hiểu yêu cầu này."
+            download_url = None
         else:
             data_result = execute_sql_api(sql)
-
-        # BƯỚC 3: SINH CÂU TRẢ LỜI (SỬA ĐOẠN NÀY)
-        # Bỏ đoạn 'if not data...' cứng nhắc. Luôn gửi cho AI xử lý ngữ cảnh.
-        
-        # Kiểm tra nếu lỗi API trả về String thì báo lỗi
-        if isinstance(data_result, str) and "Lỗi" in data_result:
-             final_answer = f"⚠️ {data_result}"
-        else:
-            # Gửi cả Data rỗng cho AI để nó "chém gió" dựa trên Prompt mới
-            ans_chain = ANSWER_PROMPT | llm | StrOutputParser()
-            final_answer = ans_chain.invoke({
-                "question": req.question,
-                "data": str(data_result) 
-            })
+            download_url = None
+            
+            # BƯỚC 3: SINH CÂU TRẢ LỜI TRƯỚC
+            if isinstance(data_result, str) and "Lỗi" in data_result:
+                final_answer = f"⚠️ {data_result}"
+            else:
+                # Gửi cả Data rỗng cho AI để nó "chém gió" dựa trên Prompt mới
+                ans_chain = ANSWER_PROMPT | llm | StrOutputParser()
+                final_answer = ans_chain.invoke({
+                    "question": req.question,
+                    "data": str(data_result) 
+                })
+            
+            # BƯỚC 4: KIỂM TRA YÊU CẦU XUẤT FILE (sau khi có câu trả lời)
+            q_lower = req.question.lower()
+            
+            if data_result and not isinstance(data_result, str):
+                # Nếu có dữ liệu và người dùng yêu cầu xuất file
+                if "word" in q_lower or "docx" in q_lower or "văn bản" in q_lower or "xuất" in q_lower or "file" in q_lower:
+                    try:
+                        file_path = create_word_report(
+                            data=data_result, 
+                            title="BÁO CÁO TRUY VẤN HRM", 
+                            filename_prefix="baocao",
+                            question=req.question,
+                            summary=final_answer
+                        )
+                        if file_path:
+                            # Lấy tên file từ path
+                            filename = os.path.basename(file_path)
+                            download_url = f"/download/{filename}"
+                    except Exception as e:
+                        print(f"Error creating word report: {e}")
 
         return ChatResponse(
             sql=sql,
             data=data_result,
-            answer=final_answer
+            answer=final_answer,
+            download_url=download_url
         )
 
     except Exception as e:

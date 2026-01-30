@@ -9,6 +9,7 @@ interface Message {
   role: "user" | "bot";
   text: string;
   timestamp: Date;
+  downloadUrl?: string;
 }
 
 const suggestedQuestions = [
@@ -61,7 +62,12 @@ export default function App() {
       setTimeout(() => {
         setMessages((prev) => [
           ...prev,
-          { role: "bot", text: data.answer, timestamp: new Date() },
+          { 
+            role: "bot", 
+            text: data.answer, 
+            timestamp: new Date(),
+            downloadUrl: data.download_url
+          },
         ]);
         setIsTyping(false);
       }, 800);
@@ -283,6 +289,17 @@ export default function App() {
                         <span className="message-time">{formatTime(m.timestamp)}</span>
                       </div>
                       <div className="message-text">{m.text}</div>
+                      {m.downloadUrl && (
+                        <button 
+                          className="download-button"
+                          onClick={() => {
+                            const baseUrl = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+                            window.location.href = `${baseUrl}${m.downloadUrl}`;
+                          }}
+                        >
+                          📥 Tải file Word
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>

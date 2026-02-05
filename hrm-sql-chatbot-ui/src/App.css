@@ -928,12 +928,22 @@ body {
 .message {
   display: flex;
   gap: 12px;
-  max-width: 85%;
+  align-items: flex-end;
+  margin-bottom: 12px;
 }
 
 .message.user {
+  justify-content: flex-end;
   margin-left: auto;
   flex-direction: row-reverse;
+  width: fit-content;
+  max-width: 75%;
+}
+
+.message.bot {
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 75%;
 }
 
 .message-avatar {
@@ -949,11 +959,53 @@ body {
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  font-size: 22px;
+  font-weight: 600;
+  animation: avatarPulse 3s ease-in-out infinite;
+  box-shadow: 0 0 20px rgba(102, 126, 234, 0.6);
+  transition: all 0.3s ease;
+}
+
+.user-avatar:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 30px rgba(102, 126, 234, 0.8);
+}
+
+.message.user .message-avatar:hover .user-avatar {
+  transform: scale(1.15);
 }
 
 .bot-avatar {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  font-size: 22px;
+  font-weight: 600;
+  animation: botBounce 2s ease-in-out infinite;
+  box-shadow: 0 0 20px rgba(245, 87, 108, 0.6);
+  transition: all 0.3s ease;
+}
+
+.bot-avatar:hover {
+  transform: scale(1.1);
+  box-shadow: 0 0 30px rgba(245, 87, 108, 0.8);
+}
+
+@keyframes avatarPulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(102, 126, 234, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(102, 126, 234, 0.9);
+  }
+}
+
+@keyframes botBounce {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(245, 87, 108, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(245, 87, 108, 0.9);
+  }
 }
 
 .message-content {
@@ -983,29 +1035,30 @@ body {
 }
 
 .message-text {
-  padding: 14px 18px;
+  padding: 12px 16px;
   border-radius: 18px;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.5;
   word-wrap: break-word;
-
-  /* ✅ FIX: cho phép xuống dòng theo \n */
   white-space: pre-line;
+  display: inline-block;
+  word-break: break-word;
 }
 
 
 .message.user .message-text {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
-  border-bottom-right-radius: 4px;
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  border-bottom-right-radius: 0px;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
 }
 
 .message.bot .message-text {
-  background: rgba(102, 126, 234, 0.1);
+  background: #f0f0f5;
   color: #333;
-  border-bottom-left-radius: 4px;
-  border: 1px solid rgba(102, 126, 234, 0.2);
+  border-bottom-left-radius: 0px;
+  border: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
 
 /* Download Button */
@@ -1080,13 +1133,20 @@ body {
   padding: 20px;
   box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
 }
 
 .input-box {
   display: flex;
   gap: 12px;
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: 0;
+  width: 100%;
+  max-width: 600px;
 }
 
 .input-box input {
@@ -1169,6 +1229,8 @@ body {
   color: #999;
   text-align: center;
   margin: 0;
+  width: 100%;
+  max-width: 600px;
 }
 
 /* ============================================

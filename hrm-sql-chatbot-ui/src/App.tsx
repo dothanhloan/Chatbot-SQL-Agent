@@ -13,10 +13,10 @@ interface Message {
 }
 
 const suggestedQuestions = [
-  "Giới thiệu về VietGuard",
-  "AI SOC là gì?",
-  "Chính sách bảo mật",
-  "Dịch vụ của ICS",
+  "Danh sách dự án trễ hạn?",
+  "Danh sách phòng ban?",
+  "Ai đi muộn hôm nay",
+  "Công việc nào chưa xong?",
 ];
 
 export default function App() {
@@ -203,14 +203,14 @@ export default function App() {
                 </div>
               </h1>
               <p className="subtitle">
-                Hỗ trợ thông tin về VietGuard, AI SOC, SmartDashboard, CSA và chính sách bảo mật
+                Trợ lý AI quản lý nhân sự - Hỗ trợ truy vấn và quản lý thông tin toàn diện
               </p>
               
               {/* Chatbot mascot with greeting */}
               <div className="header-mascot">
                 <div className="mascot-container">
                   <div className="greeting-arrow">
-                    <span className="arrow-text">Loan đây!</span>
+                    <span className="arrow-text">Trợ lý AI đây!</span>
                     <span className="arrow-icon">👉</span>
                   </div>
                   <div className="chatbot-waving">
@@ -232,22 +232,22 @@ export default function App() {
                       <div className="avatar-pulse"></div>
                     </div>
                     <h2>Xin chào! 👋</h2>
-                    <p>Tôi là trợ lý AI 'Loan Yêu Thương' của ICS Security. Tôi có thể giúp bạn tìm hiểu về:</p>
+                    <p>Tôi là trợ lý AI của ICS Security. Tôi có thể giúp bạn tìm hiểu về:</p>
                     <div className="features-grid">
                       <div className="feature-item">
-                        <span className="feature-icon">🛡️</span>
-                        <span>VietGuard</span>
+                        <span className="feature-icon">👨‍💼</span>
+                        <span>Nhân sự</span>
                       </div>
                       <div className="feature-item">
-                        <span className="feature-icon">🤖</span>
-                        <span>AI SOC</span>
+                        <span className="feature-icon">📋</span>
+                        <span>Dự án</span>
                       </div>
                       <div className="feature-item">
-                        <span className="feature-icon">🔒</span>
-                        <span>Bảo mật</span>
+                        <span className="feature-icon">🏢</span>
+                        <span>Phòng ban</span>
                       </div>
                       <div className="feature-item">
-                        <span className="feature-icon">📊</span>
+                        <span className="feature-icon">💡</span>
                         <span>Giải pháp</span>
                       </div>
                     </div>
@@ -276,7 +276,7 @@ export default function App() {
                   <div className={`message ${m.role}`}>
                     <div className="message-avatar">
                       {m.role === "user" ? (
-                        <span className="user-avatar">👤</span>
+                        <span className="user-avatar">👑</span>
                       ) : (
                         <span className="bot-avatar">🤖</span>
                       )}

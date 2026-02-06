@@ -1210,13 +1210,45 @@ def validate_leave_balance_data(data_result: Any) -> tuple[bool, str]:
         return (True, "")  # Nếu lỗi parse, bỏ qua validation
 
 # ==========================================================
+# KIỂM TRA CÂU HỎI NGOÀI LỀ
+# ==========================================================
+def is_out_of_scope_question(question: str) -> bool:
+    """Phát hiện câu hỏi hoàn toàn ngoài phạm vi HRM"""
+    q = question.lower().strip()
+    
+    # Từ khóa NGOÀI LỀ - hoàn toàn không liên quan HRM
+    out_of_scope = [
+        'thời tiết', 'mưa', 'nắng', 'gió', 'bão', 'nhiệt độ',
+        'bóng đá', 'bóng chuyền', 'bóng rổ', 'cầu lông', 'tennis', 'vđv',
+        'chính trị', 'bầu cử', 'tổng thống', 'thủ tướng', 'chiến tranh',
+        'phim', 'nhạc sĩ', 'ca sĩ', 'diễn viên', 'gameshow',
+        'cổ phiếu', 'chứng khoán', 'tiền',
+        'bệnh', 'dị ứng', 'khám bệnh', 'thuốc',
+        'tôn giáo', 'phật giáo', 'hồi giáo',
+        'bạn là ai', 'bạn tên gì', 'bạn ở đâu', 'bạn bao nhiêu tuổi',
+        'code', 'lập trình', 'python', 'javascript', 'docker',
+    ]
+    
+    return any(word in q for word in out_of_scope)
+
+# ==========================================================
 # 5. MAIN ENDPOINT (Luồng xử lý chính)
 # ==========================================================
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
     try:
-        # KIỂM TRA TRƯỚC: Câu hỏi về lương (dữ liệu nhạy cảm)
         question_lower = req.question.lower()
+        
+        # KIỂM TRA TRƯỚC: Câu hỏi ngoài lề
+        if is_out_of_scope_question(req.question):
+            return ChatResponse(
+                sql=None,
+                data=None,
+                answer="Tôi là chatbot chuyên về Quản lý Nhân sự (HRM). Câu hỏi của bạn nằm ngoài phạm vi hỗ trợ. Bạn có câu hỏi nào về nhân sự, dự án, hoặc công việc không?",
+                download_url=None
+            )
+        
+        # KIỂM TRA TRƯỚC: Câu hỏi về lương (dữ liệu nhạy cảm)
         salary_keywords = ['lương', 'thưởng', 'thù lao', 'mức lương', 'tiền lương', 'hệ số lương', 'lương cơ bản', 'phụ cấp', 'khoan trừ', 'thực linh']
         
         if any(keyword in question_lower for keyword in salary_keywords):
@@ -1280,7 +1312,7 @@ async def chat_endpoint(req: ChatRequest):
             return ChatResponse(
                 sql=None,
                 data=None,
-                answer="Xin lỗi. Tôi không có dữ liệu về vấn đề này!",
+                answer="Tôi chưa có dữ liệu cho nội dung bạn vừa đề cập. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý Nhân sự (HRM), bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
                 download_url=None
             )
 

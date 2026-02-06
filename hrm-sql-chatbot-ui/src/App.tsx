@@ -5,11 +5,14 @@ const API_URL = `${import.meta.env.VITE_API_BASE}/chat`;
 
 
 
+
 interface Message {
   role: "user" | "bot";
   text: string;
   timestamp: Date;
   downloadUrl?: string;
+  fullText?: string;
+  stopped?: boolean;
 }
 
 const suggestedQuestions = [
@@ -27,6 +30,8 @@ export default function App() {
   const [showSidebar, setShowSidebar] = useState(true);
   const chatBoxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const typingIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (chatBoxRef.current) {
@@ -49,39 +54,150 @@ export default function App() {
     setLoading(true);
     setIsTyping(true);
 
+    // Nếu đang có typing interval cũ thì clear
+    if (typingIntervalRef.current !== null) {
+      clearInterval(typingIntervalRef.current);
+      typingIntervalRef.current = null;
+    }
+
+    // Tạo AbortController mới cho request này
+    abortControllerRef.current = new AbortController();
+
     try {
       const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: messageText }),
+        signal: abortControllerRef.current.signal, // Truyền signal để có thể cancel
       });
 
       const data = await res.json();
 
-      // Simulate typing delay for better UX
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          { 
-            role: "bot", 
-            text: data.answer, 
-            timestamp: new Date(),
-            downloadUrl: data.download_url
-          },
-        ]);
+      const fullText: string = data.answer || "";
+      const downloadUrl: string | undefined = data.download_url || undefined;
+
+      // Thêm message bot rỗng để fill dần dần
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "bot",
+          text: "",
+          timestamp: new Date(),
+          downloadUrl,
+          fullText,
+          stopped: false,
+        },
+      ]);
+
+      let index = 0;
+      const step = 3; // số ký tự mỗi lần cập nhật
+      typingIntervalRef.current = window.setInterval(() => {
+        index += step;
+        setMessages((prev) => {
+          if (prev.length === 0) return prev;
+          const newMessages = [...prev];
+          const lastIndex = newMessages.length - 1;
+          const last = newMessages[lastIndex];
+          const nextText = fullText.slice(0, index);
+          newMessages[lastIndex] = { ...last, text: nextText };
+          return newMessages;
+        });
+
+        if (index >= fullText.length) {
+          if (typingIntervalRef.current !== null) {
+            clearInterval(typingIntervalRef.current);
+            typingIntervalRef.current = null;
+          }
+          setIsTyping(false);
+          setLoading(false);
+        }
+      }, 20);
+    } catch (err: any) {
+      // Nếu bị abort (cancel), không hiển thị thông báo lỗi
+      if (err.name === "AbortError") {
         setIsTyping(false);
-      }, 800);
-    } catch (err) {
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          { role: "bot", text: "❌ Lỗi kết nối backend. Vui lòng thử lại sau.", timestamp: new Date() },
-        ]);
-        setIsTyping(false);
-      }, 800);
+        setLoading(false);
+      } else {
+        setTimeout(() => {
+          setMessages((prev) => [
+            ...prev,
+            { role: "bot", text: "❌ Lỗi kết nối backend. Vui lòng thử lại sau.", timestamp: new Date() },
+          ]);
+          setIsTyping(false);
+          setLoading(false);
+        }, 800);
+      }
+    }
+  };
+
+  // Hàm dừng chat
+  const stopChat = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    if (typingIntervalRef.current !== null) {
+      clearInterval(typingIntervalRef.current);
+      typingIntervalRef.current = null;
     }
 
+    // Đánh dấu message bot gần nhất là đã dừng
+    setMessages((prev) => {
+      const arr = [...prev];
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const msg = arr[i];
+        if (msg.role === "bot" && msg.fullText && !msg.stopped) {
+          arr[i] = { ...msg, stopped: true };
+          break;
+        }
+      }
+      return arr;
+    });
+
     setLoading(false);
+    setIsTyping(false);
+  };
+
+  // Tiếp tục trả lời phần còn lại của một message đã bị dừng
+  const resumeMessage = (messageIndex: number) => {
+    setLoading(true);
+    setIsTyping(true);
+
+    if (typingIntervalRef.current !== null) {
+      clearInterval(typingIntervalRef.current);
+      typingIntervalRef.current = null;
+    }
+
+    typingIntervalRef.current = window.setInterval(() => {
+      setMessages((prev) => {
+        const arr = [...prev];
+        const msg = arr[messageIndex];
+        if (!msg || !msg.fullText) {
+          return prev;
+        }
+
+        const currentLength = msg.text.length;
+        const step = 3;
+        const nextLength = Math.min(currentLength + step, msg.fullText.length);
+        const nextText = msg.fullText.slice(0, nextLength);
+
+        arr[messageIndex] = {
+          ...msg,
+          text: nextText,
+          stopped: false, // sau khi bấm Thử lại thì không hiện dòng thông báo nữa
+        };
+
+        if (nextLength >= msg.fullText.length) {
+          if (typingIntervalRef.current !== null) {
+            clearInterval(typingIntervalRef.current);
+            typingIntervalRef.current = null;
+          }
+          setIsTyping(false);
+          setLoading(false);
+        }
+
+        return arr;
+      });
+    }, 20);
   };
 
   const handleSuggestionClick = (suggestion: string) => {
@@ -288,7 +404,20 @@ export default function App() {
                         </span>
                         <span className="message-time">{formatTime(m.timestamp)}</span>
                       </div>
-                      <div className="message-text">{m.text}</div>
+                      <div className="message-text">
+                        {m.text}
+                        {m.stopped && m.fullText && (
+                          <div className="stop-note-row">
+                            <span className="stop-note-text">Bạn đã dừng câu trả lời này</span>
+                            <button
+                              className="retry-button"
+                              onClick={() => resumeMessage(i)}
+                            >
+                              ⟳ Thử lại
+                            </button>
+                          </div>
+                        )}
+                      </div>
                       {m.downloadUrl && (
                         <button 
                           className="download-button"
@@ -331,20 +460,26 @@ export default function App() {
                   onKeyDown={(e) => e.key === "Enter" && !loading && sendMessage()}
                   disabled={loading}
                 />
-                <button 
-                  onClick={() => sendMessage()} 
-                  disabled={loading || !question.trim()}
-                  className="send-button"
-                >
-                  {loading ? (
-                    <span className="loading-spinner">⏳</span>
-                  ) : (
+                {loading ? (
+                  <button 
+                    onClick={stopChat}
+                    className="stop-button"
+                    title="Dừng chat"
+                  >
+                    <span className="stop-icon">⏹️</span>
+                  </button>
+                ) : (
+                  <button 
+                    onClick={() => sendMessage()} 
+                    disabled={!question.trim()}
+                    className="send-button"
+                  >
                     <span className="send-icon">➤</span>
-                  )}
-                </button>
+                  </button>
+                )}
               </div>
               <p className="input-hint">
-                Nhấn Enter để gửi • Hỗ trợ tiếng Việt
+                Nhấn Enter để gửi • Hỗ trợ tiếng Việt {loading && "• Nhấn nút ⏹️ để dừng"}
               </p>
             </div>
           </div>

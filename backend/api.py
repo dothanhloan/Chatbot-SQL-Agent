@@ -218,10 +218,18 @@ BẢNG du_an: id, ten_du_an, lead_id (PM), phong_ban (varchar), trang_thai_duan,
 BẢNG cong_viec: id, ten_cong_viec, nguoi_giao_id, han_hoan_thanh, trang_thai, muc_do_uu_tien, du_an_id.
 BẢNG cong_viec_nguoi_nhan: id, cong_viec_id, nhan_vien_id.
 BẢNG cong_viec_tien_do: id, cong_viec_id, phan_tram.
+BẢNG cong_viec_quy_trinh: id, cong_viec_id, ten_buoc, mo_ta, trang_thai, ngay_bat_dau, ngay_ket_thuc, ngay_tao.
+
+-- HỆ THỐNG --
+BẢNG cau_hinh_he_thong: id, ten_cau_hinh, gia_tri, mo_ta, ngay_tao.
 
 -- TÀI LIỆU & HỆ THỐNG [Source: 14] --
-BẢNG tai_lieu: id, ten_tai_lieu, mo_ta, link_tai_lieu, nguoi_tao_id.
+BẢNG tai_lieu: id, ten_tai_lieu, mo_ta, file_path, file_name, file_type, file_size, loai_tai_lieu, trang_thai, doi_tuong_xem, luot_xem, luot_tai, ngay_tao, ngay_cap_nhat, nguoi_tao_id.
 BẢNG thong_bao: id, tieu_de, noi_dung, nguoi_nhan_id.
+BẢNG lich_trinh: id, tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc, ngay_tao.
+
+-- QUYỀN HẠN & PHÂN QUYỀN [Source: 15] --
+BẢNG quyen: id, nhom_quyen, ma_quyen, ten_quyen.
 
 """
 
@@ -555,6 +563,81 @@ DANH SÁCH BẢNG VÀ LUẬT NGHIỆP VỤ BẮT BUỘC (DATA TRUTH):
       + Kết quả SQL (tất cả dòng + tất cả cột)
       + Không được rút gọn hay tóm lược
 
+27. **BẢNG `cau_hinh_he_thong` (SYSTEM CONFIGURATION):**
+    - **Định nghĩa:** Chứa các cấu hình, thiết lập hệ thống, tham số toàn cục
+    - **Các cột:** `id`, `ten_cau_hinh` (tên cấu hình), `gia_tri` (giá trị), `mo_ta` (mô tả), `ngay_tao` (ngày tạo)
+    - **Câu hỏi liên quan:**
+      + "Có bao nhiêu cấu hình hệ thống?" → `SELECT COUNT(*) FROM cau_hinh_he_thong`
+      + "Danh sách toàn bộ cấu hình" → `SELECT ten_cau_hinh, gia_tri FROM cau_hinh_he_thong`
+      + "Cấu hình nào có tên [X]" → `SELECT * FROM cau_hinh_he_thong WHERE ten_cau_hinh LIKE '%[X]%'`
+      + "Cấu hình working_hours được tạo bao giờ?" → `SELECT ngay_tao FROM cau_hinh_he_thong WHERE ten_cau_hinh = 'working_hours'`
+    - **Lưu ý:** Đây là bảng riêng biệt, KHÔNG liên quan đến nhân viên, dự án hay công việc
+    - **Quyền hạn:** Thường là thông tin dành cho quản trị viên hệ thống
+
+28. **BẢNG `cong_viec_quy_trinh` (WORKFLOW STEPS - QUAN TRỌNG):**
+    - **Định nghĩa:** Mỗi công việc (cong_viec) có thể được chia thành nhiều bước (quy trình)
+    - **Các cột:** `id`, `cong_viec_id` (FK), `ten_buoc` (tên bước), `mo_ta` (mô tả), `trang_thai` (trạng thái), `ngay_bat_dau`, `ngay_ket_thuc`, `ngay_tao`
+    - **Trạng thái bước:** "Đang thực hiện", "Đã hoàn thành", "Hủy", "Tạm dừng", v.v.
+    - **⚠️ QUY TẮC NHẤT QUÁN GIỮA COUNT VÀ SELECT (CRITICAL):**
+      + **PHẢI dùng cùng điều kiện WHERE cho COUNT và SELECT**
+      + **KHÔNG được:** COUNT lấy tất cả 10 bước, nhưng SELECT chỉ lấy 8 bước (vì có thêm filter trạng thái)
+      + **ĐÚNG:** Nếu lọc bước "Đã hoàn thành", cả COUNT và SELECT phải có `WHERE ... AND trang_thai = 'Đã hoàn thành'`
+    - **QUY TẮC LỌC MẶC ĐỊNH:**
+      + Khi hỏi về bước, MẶC ĐỊNH chỉ lấy bước HOẠT ĐỘNG (không lấy bước bị "Hủy")
+      + Điều kiện: `WHERE cong_viec_id = ? AND trang_thai != 'Hủy'` (hoặc phù hợp với DB)
+      + LỆ NGOẠI: Nếu người dùng tường minh hỏi "Các bước bị hủy", thì mới bỏ filter
+    - **SQL examples:**
+      + "Công việc 205 có bao nhiêu bước?" → `SELECT COUNT(*) FROM cong_viec_quy_trinh WHERE cong_viec_id = 205 AND trang_thai != 'Hủy'`
+      + "Liệt kê bước của công việc 205" → `SELECT ten_buoc, trang_thai FROM cong_viec_quy_trinh WHERE cong_viec_id = 205 AND trang_thai != 'Hủy' ORDER BY ngay_bat_dau`
+      + CHÍNH XÁC: COUNT = 8, SELECT = 8 bước (KHÔNG bao gồm bước bị hủy)
+
+29. **SUBQUERY & IN OPERATOR - QUAN TRỌNG ĐỀ PHÒNG LỖI:**
+    - **Vấn đề:** Khi query công việc theo tên (hoặc bất kỳ điều kiện nào), có thể có NHIỀU công việc khớp
+    - **TUYỆT ĐỐI CẤM:** Dùng `WHERE cong_viec_id = (SELECT id FROM cong_viec WHERE ...)` khi subquery có thể trả >1 row
+    - **PHẢI dùng:** `WHERE cong_viec_id IN (SELECT id FROM cong_viec WHERE ...)`
+    - **Ví dụ SAI (lỗi):**
+      + `SELECT COUNT(*) FROM cong_viec_quy_trinh WHERE cong_viec_id = (SELECT id FROM cong_viec WHERE ten_cong_viec LIKE '%Oracle Cloud%')`
+      + Nếu có 2 công việc "Oracle Cloud", subquery trả 2 row → ERROR: "Subquery returns more than 1 row"
+    - **Ví dụ ĐÚNG:**
+      + `SELECT COUNT(*) FROM cong_viec_quy_trinh WHERE cong_viec_id IN (SELECT id FROM cong_viec WHERE ten_cong_viec LIKE '%Oracle Cloud%')`
+      + Kết quả: Tính tổng bước của TẤT CẢ công việc có tên chứa "Oracle Cloud"
+    - **Nguyên tắc:**
+      + ALWAYS dùng `IN` cho subquery nhiều hàng
+      + Chỉ dùng `=` khi chắc chắn subquery trả 1 hàng duy nhất (VD: `WHERE id = (SELECT ... LIMIT 1)`)
+
+30. **BẢNG `lich_trinh` (SCHEDULE/CALENDAR - LỊ TRÌNH SỰ KIỆN):**
+    - **Định nghĩa:** Lưu trữ lịch trình, sự kiện, hội thảo, buổi gặp mặt, v.v.
+    - **Các cột:** `id`, `tieu_de` (tiêu đề sự kiện), `mo_ta` (mô tả chi tiết), `ngay_bat_dau`, `ngay_ket_thuc`, `ngay_tao`
+    - **Câu hỏi liên quan:**
+      + "Có bao nhiêu sự kiện?" → `SELECT COUNT(*) FROM lich_trinh`
+      + "Sự kiện nào hôm nay?" → `SELECT tieu_de, mo_ta FROM lich_trinh WHERE ngay_bat_dau = CURRENT_DATE`
+      + "Sự kiện sắp tới?" → `SELECT tieu_de, ngay_bat_dau FROM lich_trinh WHERE ngay_bat_dau >= CURRENT_DATE ORDER BY ngay_bat_dau`
+      + "Sự kiện nào đã qua?" → `SELECT tieu_de, ngay_ket_thuc FROM lich_trinh WHERE ngay_ket_thuc < CURRENT_DATE ORDER BY ngay_ket_thuc DESC`
+      + "Tìm sự kiện 'LBS startup'?" → `SELECT tieu_de, mo_ta, ngay_bat_dau FROM lich_trinh WHERE tieu_de LIKE '%LBS%'`
+    - **Lưu ý:** LUÔN kiểm tra `ngay_bat_dau >= CURRENT_DATE` (sắp tới) vs `<` (đã qua)
+
+31. **BẢNG `quyen` (PERMISSIONS - QUYỀN HẠN VÀ PHÂN QUYỀN):**
+    - **Định nghĩa:** Lưu trữ danh sách các quyền hạn, nhóm quyền, và mã quyền trong hệ thống.
+    - **Các cột:** `id`, `nhom_quyen` (nhóm quyền: phongban, nhanvien, quanly, admin), `ma_quyen` (mã quyền duy nhất), `ten_quyen` (tên hiển thị của quyền)
+    - **Câu hỏi liên quan:**
+      + "Có bao nhiêu quyền hạn?" → `SELECT COUNT(*) FROM quyen`
+      + "Liệt kê tất cả quyền hạn" → `SELECT ma_quyen, ten_quyen, nhom_quyen FROM quyen`
+      + "Quyền hạn nào liên quan tới phòng ban?" → `SELECT ma_quyen, ten_quyen FROM quyen WHERE nhom_quyen LIKE '%phongban%'`
+      + "Tìm quyền 'Thêm phòng ban'" → `SELECT id, ma_quyen, ten_quyen FROM quyen WHERE ten_quyen LIKE '%Thêm phòng ban%'`
+      + "Danh sách quyền hạn của nhóm 'nhanvien'" → `SELECT ma_quyen, ten_quyen FROM quyen WHERE nhom_quyen = 'nhanvien'`
+    - **Lưu ý:** `nhom_quyen` là nhóm lôgic (phongban, nhanvien, quanly, admin); `ma_quyen` là mã duy nhất không thay đổi
+
+32. **BẢNG `tai_lieu` (DOCUMENTS - TÀI LIỆU & HỆ THỐNG):**
+    - **Định nghĩa:** Lưu trữ tài liệu, báo cáo, hộp cò và các file chia sẻ trong hệ thống.
+    - **Các cột:** `id`, `ten_tai_lieu` (tên tài liệu), `mo_ta` (mô tả), `file_path` (đường dẫn file), `file_name` (tên file), `file_type` (MIME type), `file_size` (kích thước), `loai_tai_lieu` (loại: Báo cáo, Hộp cò, v.v.), `trang_thai` (Hoạt động, Đã xóa), `doi_tuong_xem` (Tất cả, Phòng ban, Nhân viên), `luot_xem` (số lần xem), `luot_tai` (số lần tải), `ngay_tao`, `ngay_cap_nhat`, `nguoi_tao_id`
+    - **Câu hỏi liên quan:**
+      + "Có bao nhiêu tài liệu?" → `SELECT COUNT(*) FROM tai_lieu WHERE trang_thai != 'Đã xóa'`
+      + "Liệt kê tất cả tài liệu" → `SELECT ten_tai_lieu, loai_tai_lieu, ngay_tao FROM tai_lieu WHERE trang_thai != 'Đã xóa'`
+      + "Tài liệu nào được xem nhiều nhất?" → `SELECT ten_tai_lieu, luot_xem FROM tai_lieu WHERE trang_thai != 'Đã xóa' ORDER BY luot_xem DESC LIMIT 1`
+      + "Tài liệu nào được tải nhiều nhất?" → `SELECT ten_tai_lieu, loai_tai_lieu, luot_tai FROM tai_lieu WHERE trang_thai != 'Đã xóa' ORDER BY luot_tai DESC LIMIT 1`
+      + "Tìm tài liệu 'File cài đặt CSA'" → `SELECT ten_tai_lieu, file_name, file_size, ngay_tao FROM tai_lieu WHERE ten_tai_lieu LIKE '%File cài đặt CSA%'`
+    - **Lưu ý:** Luôn lọc `WHERE trang_thai != 'Đã xóa'` để không hiển thị file đã bị xóa; dùng `luot_xem` và `luot_tai` để sắp xếp theo mức độ sử dụng
+
 SCHEMA CHI TIẾT:
 {HRM_SCHEMA_RAW}
 """
@@ -706,6 +789,18 @@ Bạn là SQL Generation Engine. Nhiệm vụ: Chuyển câu hỏi thành SQL Se
   a) Câu hỏi hoàn toàn KHÔNG liên quan đến HRM / Dự án / Nhân sự
   b) Không ánh xạ được tới BẤT KỲ bảng nào trong schema
 - Nếu câu hỏi còn mơ hồ nhưng có khả năng liên quan,hãy suy luận hợp lý nhất và sinh SQL an toàn.
+
+7. **⛔ LỌC KPI (CONFIDENTIAL - KHÔNG CÔNG KHAI):**
+   - Nếu câu hỏi chứa từ khóa: "KPI", "chỉ số hiệu suất", "performance", "target", "mục tiêu công ty", "kết quả kinh doanh"
+   - Phải TỪNG VÀ KHÔNG SINH SQL
+   - Trả về: "KPI_BLOCKED" (để backend xử lý thành: "Dữ liệu KPI là thông tin không công khai. Bạn có muốn hỏi về các vấn đề khác không?")
+   - KHÔNG bao giờ cho phép query đó dù câu hỏi có hint rằng dữ liệu ở đâu
+
+8. **⛔ LỌC LỊCH SỬ NHÂN SỰ (CONFIDENTIAL - KHÔNG CÔNG KHAI):**
+   - Nếu câu hỏi chứa từ khóa: "lịch sử", "quá khứ", "công việc trước", "kinh nghiệm làm việc", "hồ sơ", "tiểu sử", "trước đây", "từng làm", "đã làm việc ở"
+   - Phải TỪNG VÀ KHÔNG SINH SQL
+   - Trả về: "HISTORY_BLOCKED" (để backend xử lý thành: "Dữ liệu lịch sử nhân sự là thông tin không được công khai. Bạn có muốn hỏi về các vấn đề khác không?")
+   - KHÔNG bao giờ cho phép query đó dù câu hỏi có hint rằng dữ liệu ở đâu
 
 HỌC TỪ VÍ DỤ (FEW-SHOT):
 
@@ -919,6 +1014,22 @@ User: "Liệt kê những dự án đã hoàn thành trên 80%?"
   -> SQL: SELECT nv.ho_ten, np.tong_ngay_phep, np.ngay_phep_da_dung, np.ngay_phep_con_lai FROM ngay_phep_nam np JOIN nhanvien nv ON np.nhan_vien_id = nv.id WHERE nv.id = 5 AND np.nam = YEAR(CURRENT_DATE)
 - User: "Tổng phép của toàn công ty năm 2026?"
   -> SQL: SELECT COUNT(DISTINCT np.nhan_vien_id) as so_nhan_vien, SUM(np.tong_ngay_phep) as tong_phep FROM ngay_phep_nam np WHERE np.nam = 2026
+
+- User: "Công việc 205 có bao nhiêu bước?"
+  -> SQL: SELECT COUNT(*) as so_buoc FROM cong_viec_quy_trinh WHERE cong_viec_id = 205 AND trang_thai != 'Hủy'
+- User: "Liệt kê các bước của công việc 205"
+  -> SQL: SELECT ten_buoc, trang_thai, ngay_bat_dau, ngay_ket_thuc FROM cong_viec_quy_trinh WHERE cong_viec_id = 205 AND trang_thai != 'Hủy' ORDER BY ngay_bat_dau
+- User: "Các bước nào của công việc 205 đã hoàn thành?"
+  -> SQL: SELECT ten_buoc, ngay_ket_thuc FROM cong_viec_quy_trinh WHERE cong_viec_id = 205 AND trang_thai = 'Đã hoàn thành'
+- User: "Bước nào của công việc 205 trễ hạn?"
+  -> SQL: SELECT ten_buoc, ngay_ket_thuc FROM cong_viec_quy_trinh WHERE cong_viec_id = 205 AND ngay_ket_thuc < CURRENT_DATE AND trang_thai != 'Hủy' AND trang_thai != 'Đã hoàn thành'
+- User: "Tìm bước 'Phân tích yêu cầu' trong công việc"
+  -> SQL: SELECT ten_buoc, trang_thai, mo_ta FROM cong_viec_quy_trinh WHERE ten_buoc LIKE '%Phân tích%'
+- User: "Công việc 'Oracle Cloud' có bao nhiêu bước?"
+  -> SQL: SELECT COUNT(*) as so_buoc FROM cong_viec_quy_trinh WHERE cong_viec_id IN (SELECT id FROM cong_viec WHERE ten_cong_viec LIKE '%Oracle Cloud%' AND trang_thai != 'Hủy') AND trang_thai != 'Hủy'
+- User: "Liệt kê bước của công việc 'Gurucul AI Agent'"
+  -> SQL: SELECT ten_buoc, trang_thai, ngay_bat_dau, ngay_ket_thuc FROM cong_viec_quy_trinh WHERE cong_viec_id IN (SELECT id FROM cong_viec WHERE ten_cong_viec LIKE '%Gurucul%') AND trang_thai != 'Hủy'
+
 - User: "Danh sách nhân viên còn dưới 5 ngày phép?"
   -> SQL: SELECT nv.ho_ten, np.ngay_phep_con_lai FROM ngay_phep_nam np JOIN nhanvien nv ON np.nhan_vien_id = nv.id WHERE np.nam = YEAR(CURRENT_DATE) AND np.ngay_phep_con_lai < 5
 - User: "Nhân viên nào đã dùng hết phép?"
@@ -943,6 +1054,49 @@ User: "Liệt kê những dự án đã hoàn thành trên 80%?"
 - User: "Có bao nhiêu nhân viên?" -> SQL: SELECT COUNT(*) as tong_so_nhan_vien FROM nhanvien WHERE trang_thai_lam_viec != 'Nghỉ việc'
 - User: "Danh sách nhân viên đang làm việc" -> SQL: SELECT ho_ten FROM nhanvien WHERE trang_thai_lam_viec = 'Đang làm'
 - User: "Danh sách nhân viên đã nghỉ việc" -> SQL: SELECT ho_ten FROM nhanvien WHERE trang_thai_lam_viec = 'Nghỉ việc'
+
+- User: "Danh sách công việc đang thực hiện" -> SQL: SELECT ten_cong_viec, han_hoan_thanh FROM cong_viec WHERE trang_thai = 'Đang thực hiện' AND trang_thai != 'Hủy'
+- User: "Công việc nào trễ hạn?" -> SQL: SELECT ten_cong_viec, han_hoan_thanh FROM cong_viec WHERE han_hoan_thanh < CURRENT_DATE AND trang_thai NOT IN ('Đã hoàn thành', 'Hủy')
+- User: "Tôi cần tìm info công việc 'Oracle Cloud'" -> SQL: SELECT ten_cong_viec, trang_thai, han_hoan_thanh FROM cong_viec WHERE ten_cong_viec LIKE '%Oracle Cloud%'
+- User: "Bao nhiêu công việc được giao cho nhân viên 'Trần Minh'?" -> SQL: SELECT COUNT(DISTINCT cv.id) FROM cong_viec cv JOIN cong_viec_nguoi_nhan cvnn ON cv.id = cvnn.cong_viec_id JOIN nhanvien nv ON cvnn.nhan_vien_id = nv.id WHERE nv.ho_ten LIKE '%Trần Minh%' AND cv.trang_thai != 'Hủy'
+
+- User: "Có bao nhiêu cấu hình hệ thống?" -> SQL: SELECT COUNT(*) as tong_so_cau_hinh FROM cau_hinh_he_thong
+- User: "Danh sách cấu hình hệ thống" -> SQL: SELECT ten_cau_hinh, gia_tri FROM cau_hinh_he_thong
+- User: "Cấu hình nào liên quan tới email?" -> SQL: SELECT ten_cau_hinh, gia_tri, mo_ta FROM cau_hinh_he_thong WHERE ten_cau_hinh LIKE '%email%'
+- User: "Cấu hình working_hours được tạo bao giờ?" -> SQL: SELECT ngay_tao FROM cau_hinh_he_thong WHERE ten_cau_hinh LIKE '%working_hours%'
+
+- User: "Có bao nhiêu sự kiện trong hệ thống?" -> SQL: SELECT COUNT(*) as tong_su_kien FROM lich_trinh
+- User: "Liệt kê tất cả sự kiện" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh ORDER BY ngay_bat_dau DESC
+- User: "Sự kiện nào hôm nay?" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh WHERE ngay_bat_dau = CURRENT_DATE ORDER BY ngay_bat_dau
+- User: "Sự kiện sắp tới trong tuần tới?" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh WHERE ngay_bat_dau >= CURRENT_DATE AND ngay_bat_dau < DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY) ORDER BY ngay_bat_dau
+- User: "Sự kiện nào đã qua?" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh WHERE ngay_ket_thuc < CURRENT_DATE ORDER BY ngay_ket_thuc DESC
+- User: "Tìm sự kiện 'Hội thảo'" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh WHERE tieu_de LIKE '%Hội thảo%' ORDER BY ngay_bat_dau
+- User: "Sự kiện 'LBS startup showcase' kết thúc khi nào?" -> SQL: SELECT tieu_de, ngay_ket_thuc FROM lich_trinh WHERE tieu_de LIKE '%LBS startup showcase%'
+- User: "Tất cả sự kiện được tạo trong tháng 2/2026?" -> SQL: SELECT tieu_de, ngay_bat_dau, ngay_tao FROM lich_trinh WHERE MONTH(ngay_tao) = 2 AND YEAR(ngay_tao) = 2026 ORDER BY ngay_bat_dau
+- User: "Sự kiện nào có ngày bắt đầu là 2026-02-15?" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh WHERE ngay_bat_dau = '2026-02-15'
+- User: "Liệt kê sự kiện kéo dài nhiều ngày (từ 2 ngày trở lên)" -> SQL: SELECT tieu_de, ngay_bat_dau, ngay_ket_thuc, DATEDIFF(ngay_ket_thuc, ngay_bat_dau) as so_ngay FROM lich_trinh WHERE DATEDIFF(ngay_ket_thuc, ngay_bat_dau) > 1 ORDER BY ngay_bat_dau
+- User: "Danh sách sự kiện sắp tới sắp xếp theo ngày?" -> SQL: SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc FROM lich_trinh WHERE ngay_bat_dau >= CURRENT_DATE ORDER BY ngay_bat_dau ASC
+
+- User: "Có bao nhiêu quyền hạn?" -> SQL: SELECT COUNT(*) as tong_quyen FROM quyen
+- User: "Liệt kê tất cả quyền hạn" -> SQL: SELECT id, ma_quyen, ten_quyen, nhom_quyen FROM quyen ORDER BY nhom_quyen, ma_quyen
+- User: "Quyền hạn liên quan tới phòng ban?" -> SQL: SELECT ma_quyen, ten_quyen FROM quyen WHERE nhom_quyen LIKE '%phongban%'
+- User: "Tìm quyền 'Thêm phòng ban'" -> SQL: SELECT id, ma_quyen, ten_quyen FROM quyen WHERE ten_quyen LIKE '%Thêm phòng ban%'
+- User: "Danh sách quyền hạn của nhóm nhanvien" -> SQL: SELECT ma_quyen, ten_quyen FROM quyen WHERE nhom_quyen = 'nhanvien' ORDER BY ten_quyen
+- User: "Có bao nhiêu nhóm quyền khác nhau?" -> SQL: SELECT COUNT(DISTINCT nhom_quyen) as so_nhom_quyen FROM quyen
+- User: "Liệt kê tất cả nhóm quyền" -> SQL: SELECT DISTINCT nhom_quyen FROM quyen ORDER BY nhom_quyen
+- User: "Bao nhiêu quyền hạn trong nhóm admin?" -> SQL: SELECT COUNT(*) as so_quyen_admin FROM quyen WHERE nhom_quyen = 'admin'
+- User: "Quyền nào liên quan tới 'quản lý'?" -> SQL: SELECT id, ma_quyen, ten_quyen, nhom_quyen FROM quyen WHERE ten_quyen LIKE '%quản lý%' OR ten_quyen LIKE '%Quản lý%'
+
+- User: "Có bao nhiêu tài liệu?" -> SQL: SELECT COUNT(*) as tong_tai_lieu FROM tai_lieu WHERE trang_thai != 'Đã xóa'
+- User: "Liệt kê tất cả tài liệu" -> SQL: SELECT ten_tai_lieu, loai_tai_lieu, file_size, luot_xem, ngay_tao FROM tai_lieu WHERE trang_thai != 'Đã xóa' ORDER BY ngay_tao DESC
+- User: "Tài liệu nào được xem nhiều nhất?" -> SQL: SELECT ten_tai_lieu, loai_tai_lieu, luot_xem, file_name FROM tai_lieu WHERE trang_thai != 'Đã xóa' ORDER BY luot_xem DESC LIMIT 1
+- User: "Tài liệu nào được tải nhiều nhất?" -> SQL: SELECT ten_tai_lieu, loai_tai_lieu, luot_tai, file_size, file_name FROM tai_lieu WHERE trang_thai != 'Đã xóa' ORDER BY luot_tai DESC LIMIT 1
+- User: "Tìm tài liệu 'File cài đặt CSA'" -> SQL: SELECT ten_tai_lieu, mo_ta, file_name, file_size, loai_tai_lieu, ngay_tao FROM tai_lieu WHERE ten_tai_lieu LIKE '%File cài đặt CSA%'
+- User: "Danh sách tài liệu loại 'Báo cáo'" -> SQL: SELECT ten_tai_lieu, mo_ta, file_size, luot_xem, luot_tai FROM tai_lieu WHERE loai_tai_lieu = 'Báo cáo' AND trang_thai != 'Đã xóa' ORDER BY ngay_tao DESC
+- User: "Tài liệu nào được tạo trong tháng 1/2026?" -> SQL: SELECT ten_tai_lieu, loai_tai_lieu, file_name, ngay_tao FROM tai_lieu WHERE trang_thai != 'Đã xóa' AND MONTH(ngay_tao) = 1 AND YEAR(ngay_tao) = 2026 ORDER BY ngay_tao DESC
+- User: "Bao nhiêu tài liệu cho phép xem 'Tất cả'?" -> SQL: SELECT COUNT(*) as so_tai_lieu FROM tai_lieu WHERE trang_thai != 'Đã xóa' AND doi_tuong_xem = 'Tất cả'
+- User: "Danh sách tài liệu do nhân viên ID 18 tạo" -> SQL: SELECT ten_tai_lieu, loai_tai_lieu, file_size, luot_xem, ngay_tao FROM tai_lieu WHERE nguoi_tao_id = 18 AND trang_thai != 'Đã xóa' ORDER BY ngay_tao DESC
+- User: "Tài liệu nào có kích thước lớn nhất?" -> SQL: SELECT ten_tai_lieu, file_name, file_size, loai_tai_lieu, ngay_tao FROM tai_lieu WHERE trang_thai != 'Đã xóa' ORDER BY file_size DESC LIMIT 1
 
 ⚠️ CÁC GIÁ TRỊ CHÍNH XÁC CỦA TRẠNG THÁI LÀM VIỆC:
 - 'Đang làm' = Nhân viên đang làm việc
@@ -1259,6 +1413,29 @@ async def chat_endpoint(req: ChatRequest):
                 download_url=None
             )
         
+        # KIỂM TRA TRƯỚC: Câu hỏi về KPI (dữ liệu không công khai)
+        kpi_keywords = ['kpi', 'chỉ số hiệu suất', 'performance', 'target', 'mục tiêu công ty', 'kết quả kinh doanh', 'chỉ số', 'hiệu suất', 'mục tiêu']
+        
+        if any(keyword in question_lower for keyword in kpi_keywords):
+            return ChatResponse(
+                sql=None,
+                data=None,
+                answer="Dữ liệu KPI là thông tin không công khai. Bạn có muốn hỏi về các vấn đề khác không?",
+                download_url=None
+            )
+        
+        # KIỂM TRA TRƯỚC: Câu hỏi về lịch sử nhân sự (dữ liệu không công khai)
+        history_keywords = ['lịch sử', 'quá khứ', 'công việc trước', 'kinh nghiệm làm việc', 'hồ sơ', 'tiểu sử', 'trước đây',]
+        
+        if any(keyword in question_lower for keyword in history_keywords):
+            return ChatResponse(
+                sql=None,
+                data=None,
+                answer="Dữ liệu lịch sử nhân sự là thông tin không được công khai. Bạn có muốn hỏi về các vấn đề khác không?",
+                download_url=None
+            )
+        
+        
         # KIỂM TRA TRƯỚC: Câu hỏi về chấm công/đi muộn ngày tương lai
         from datetime import datetime, timedelta
         import re
@@ -1313,6 +1490,24 @@ async def chat_endpoint(req: ChatRequest):
                 sql=None,
                 data=None,
                 answer="Tôi chưa có dữ liệu cho nội dung bạn vừa đề cập. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý Nhân sự (HRM), bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
+                download_url=None
+            )
+        
+        # Nếu câu hỏi liên quan đến KPI (dữ liệu không công khai)
+        if "KPI_BLOCKED" in sql:
+            return ChatResponse(
+                sql=None,
+                data=None,
+                answer="Dữ liệu KPI là thông tin không công khai. Bạn có muốn hỏi về các vấn đề khác không?",
+                download_url=None
+            )
+        
+        # Nếu câu hỏi liên quan đến lịch sử nhân sự (dữ liệu không công khai)
+        if "HISTORY_BLOCKED" in sql:
+            return ChatResponse(
+                sql=None,
+                data=None,
+                answer="Dữ liệu lịch sử nhân sự là thông tin không được công khai. Bạn có muốn hỏi về các vấn đề khác không?",
                 download_url=None
             )
 

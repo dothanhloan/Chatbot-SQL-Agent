@@ -28,8 +28,10 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [isListening, setIsListening] = useState(false);
   const chatBoxRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const recognitionRef = useRef<any>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const typingIntervalRef = useRef<number | null>(null);
 
@@ -207,6 +209,60 @@ export default function App() {
 
   const clearChat = () => {
     setMessages([]);
+  };
+
+  const startVoiceRecognition = () => {
+    // Kiểm tra hỗ trợ Web Speech API
+    const SpeechRecognition = window.SpeechRecognition || (window as any).webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+      alert("Trình duyệt của bạn không hỗ trợ nhập giọng nói. Vui lòng sử dụng Chrome, Edge hoặc Safari.");
+      return;
+    }
+
+    if (isListening) {
+      // Dừng lắng nghe
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'vi-VN';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = '';
+      
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        
+        if (event.results[i].isFinal) {
+          setQuestion(prev => (prev + ' ' + transcript).trim());
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error('Speech recognition error', event.error);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
   };
 
   const formatTime = (date: Date) => {
@@ -452,14 +508,34 @@ export default function App() {
 
             <div className="input-container">
               <div className="input-box">
-                <input
+                <textarea
                   ref={inputRef}
                   value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
+                  onChange={(e) => {
+                    setQuestion(e.target.value);
+                    // Auto-expand textarea
+                    e.target.style.height = 'auto';
+                    e.target.style.height = Math.min(e.target.scrollHeight, 150) + 'px';
+                  }}
                   placeholder="Nhập câu hỏi của bạn..."
-                  onKeyDown={(e) => e.key === "Enter" && !loading && sendMessage()}
+                  onKeyDown={(e) => {
+                    // Enter gửi, Shift+Enter xuống dòng
+                    if (e.key === "Enter" && !e.shiftKey && !loading) {
+                      sendMessage();
+                      e.preventDefault();
+                    }
+                  }}
                   disabled={loading}
+                  className="message-input"
                 />
+                <button
+                  onClick={startVoiceRecognition}
+                  className={`voice-button ${isListening ? 'listening' : ''}`}
+                  title={isListening ? "Dừng lắng nghe" : "Nhập bằng giọng nói"}
+                  disabled={loading}
+                >
+                  <span className="voice-icon">{isListening ? '🎙️' : '🎤'}</span>
+                </button>
                 {loading ? (
                   <button 
                     onClick={stopChat}
@@ -479,7 +555,7 @@ export default function App() {
                 )}
               </div>
               <p className="input-hint">
-                Nhấn Enter để gửi • Hỗ trợ tiếng Việt {loading && "• Nhấn nút ⏹️ để dừng"}
+                Enter để gửi • Shift+Enter xuống dòng • 🎤 để nhập giọng nói {loading && "• Nhấn nút ⏹️ để dừng"}
               </p>
             </div>
           </div>

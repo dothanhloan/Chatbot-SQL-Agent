@@ -14,6 +14,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+# Static DOCX RAG (simple, like old CLI bot)
+from static_data_rag import initialize_rag, get_rag_instance, build_static_context
+
 # ==========================================================
 # 1. SETUP & CẤU HÌNH
 # ==========================================================
@@ -25,7 +28,7 @@ if not os.environ.get("OPENAI_API_KEY"):
 
 HRM_API_URL = "https://hrm.icss.com.vn/ICSS/api/execute-sql"
 
-app = FastAPI(title="ICS HRM SQL Chatbot API", version="3.0 - OpenAI")
+app = FastAPI(title="ICS HRM SQL Chatbot API", version="3.1 - OpenAI + Static DOCX RAG (simple)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +37,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ==========================================================
+# STARTUP: initialize simple static RAG (DOCX)
+# ==========================================================
+@app.on_event("startup")
+async def startup_event() -> None:
+    try:
+        ok = initialize_rag()
+        if ok and get_rag_instance().is_initialized():
+            print("[StaticRAG] Initialized successfully")
+        else:
+            print("[StaticRAG] Initialization skipped or failed (no DOCX/data)")
+    except Exception as e:  # noqa: BLE001
+        print(f"[StaticRAG] Initialization error: {e}")
 
 # Tạo thư mục lưu file tạm
 EXPORT_DIR = "./static/reports"
@@ -195,6 +213,13 @@ llm_answer = ChatOpenAI(
     max_tokens=4000   # Tăng để hỗ trợ danh sách dài (26+ dòng)
 )
 
+# LLM router để phân loại câu hỏi HRM_SQL vs STATIC_DOC
+llm_router = ChatOpenAI(
+  model="gpt-4o-mini",
+  temperature=0,
+  max_tokens=10,
+)
+
 # Giữ lại llm tham chiếu để tương thích với code cũ
 llm = llm_sql
 # ==========================================================
@@ -205,7 +230,7 @@ HRM_SCHEMA_RAW = """
 BẢNG cham_cong: id, nhan_vien_id, ngay (date), check_in (time), check_out (time).
 
 -- NHÂN SỰ [Source: 12] --
-BẢNG nhanvien: id, ho_ten, email, so_dien_thoai, phong_ban_id, chuc_vu, vai_tro, luong_co_ban, trang_thai_lam_viec, ngay_vao_lam.
+BẢNG nhanvien: id, ho_ten, email, so_dien_thoai, phong_ban_id, chuc_vu, vai_tro, luong_co_ban, trang_thai_lam_viec, ngay_vao_lam, gioi_tinh.
 BẢNG phong_ban: id, ten_phong, truong_phong_id [Source: 13].
 
 -- LƯƠNG & KPI [Source: 10, 11] --
@@ -308,6 +333,13 @@ DANH SÁCH BẢNG VÀ LUẬT NGHIỆP VỤ BẮT BUỘC (DATA TRUTH):
      + **Câu hỏi: "Dự án nào kết thúc lâu nhất?"** → Dùng `ngay_ket_thuc`: `ORDER BY ngay_ket_thuc ASC LIMIT 1`
      + **⚠️ CẢNH BÁO:** CẤM nhầm lẫn giữa "bắt đầu" (ngay_bat_dau) và "kết thúc" (ngay_ket_thuc)
 
+5.1. **LUẬT TRA CỨU PHÒNG BAN CỦA NHÂN VIÊN (RẤT QUAN TRỌNG):**
+   - Bảng `nhanvien` KHÔNG có cột `phong_ban` dạng text, chỉ có `phong_ban_id`.
+   - Khi người dùng hỏi: "Nhân viên X thuộc phòng nào?" hoặc "X ở phòng nào?" → PHẢI JOIN bảng `phong_ban`.
+   - Câu SQL chuẩn:
+     + `SELECT nv.ho_ten, pb.ten_phong AS phong_ban FROM nhanvien nv JOIN phong_ban pb ON nv.phong_ban_id = pb.id WHERE nv.ho_ten LIKE '%Tên Nhân Viên%' AND nv.trang_thai_lam_viec != 'Nghỉ việc'`
+   - ⚠️ TUYỆT ĐỐI KHÔNG được viết `SELECT phong_ban FROM nhanvien ...` vì cột này không tồn tại trong bảng `nhanvien`.
+
 6. **LUẬT GIAO VIỆC (QUAN TRỌNG - MANY-TO-MANY):**
    - Bảng `cong_viec` KHÔNG lưu trực tiếp người thực hiện (chỉ lưu `nguoi_giao_id`).
    - Để tìm **"Ai làm việc gì"** hoặc **"Việc này ai làm"**:
@@ -350,23 +382,23 @@ DANH SÁCH BẢNG VÀ LUẬT NGHIỆP VỤ BẮT BUỘC (DATA TRUTH):
      + Ví dụ: "2025 công ty tuyển bao nhiêu nhân viên?" -> `= 2025` (chỉ năm đó)
      + Nhưng "2025 phòng X có bao nhiêu nhân viên?" -> `<= 2025` (tất cả nhân viên ở phòng đó từ quá khứ)
 7.  **LUẬT CHUẨN HÓA DỮ LIỆU (QUAN TRỌNG - MỚI):**
-   - **Trạng thái công việc:** Trong DB lưu chính xác là `'Đã hoàn thành'` (Tuyệt đối không dùng 'Hoàn thành' hay 'Done').
-   - **Logic chưa xong:** `trang_thai != 'Đã hoàn thành'`.
-   - **Logic trễ hạn:** `han_hoan_thanh < CURRENT_DATE` AND `trang_thai != 'Đã hoàn thành'`.
+  - **Trạng thái công việc:** Trong DB lưu chính xác là `'Đã hoàn thành'` (Tuyệt đối không dùng 'Hoàn thành' hay 'Done').
+  - **Logic chưa xong:** `trang_thai != 'Đã hoàn thành'`.
+  - **Logic trễ hạn:** `han_hoan_thanh <= CURRENT_DATE` AND `trang_thai != 'Đã hoàn thành'`.
 
 8. **LUẬT TRỄ HẠN (DEADLINE LOGIC - RẤT QUAN TRỌNG):**
    - **Định nghĩa:** Một dự án hoặc công việc bị coi là trễ hạn (Overdue) khi:
-     `ngay_ket_thuc < CURRENT_DATE` (hoặc `han_hoan_thanh < CURRENT_DATE`)
+     `ngay_ket_thuc <= CURRENT_DATE` (hoặc `han_hoan_thanh <= CURRENT_DATE`)
      AND `trang_thai != 'Đã hoàn thành'`.
    - **Lưu ý:** Luôn phải kiểm tra trạng thái. Nếu đã xong (`'Đã hoàn thành'`) thì dù quá ngày cũng không tính là trễ (có thể là xong muộn, nhưng hiện tại không còn treo).
    - **PHÂN BIỆT DỰ ÁN vs CÔNG VIỆC - TRỄ HẠN (RẤT QUAN TRỌNG):**
      + **Câu hỏi: "Dự án trễ hạn?"** (hỏi DỰ ÁN bị trễ)
-       → Lọc dự án: `WHERE trang_thai_duan != 'Đã hoàn thành' AND trang_thai_duan != 'Tạm Ngưng' AND ngay_ket_thuc < CURRENT_DATE`
+       → Lọc dự án: `WHERE trang_thai_duan != 'Đã hoàn thành' AND trang_thai_duan != 'Tạm Ngưng' AND ngay_ket_thuc <= CURRENT_DATE`
        → Lý do: Dự án tạm ngưng không tính trễ hạn (đã dừng), chỉ tính những dự án "Đang thực hiện" bị trễ
      + **Câu hỏi: "Công việc trễ hạn?"** (hỏi CÔNG VIỆC bị trễ)
-       → Lọc công việc: `WHERE trang_thai != 'Đã hoàn thành' AND han_hoan_thanh < CURRENT_DATE`
+       → Lọc công việc: `WHERE trang_thai != 'Đã hoàn thành' AND han_hoan_thanh <= CURRENT_DATE`
    - **SQL mẫu cho dự án trễ hạn:**
-     + `SELECT ten_du_an, ngay_ket_thuc FROM du_an WHERE ngay_ket_thuc < CURRENT_DATE AND trang_thai_duan NOT IN ('Đã hoàn thành', 'Tạm Ngưng')`
+     + `SELECT ten_du_an, ngay_ket_thuc FROM du_an WHERE ngay_ket_thuc <= CURRENT_DATE AND trang_thai_duan NOT IN ('Đã hoàn thành', 'Tạm Ngưng')`
 
 23. **LUẬT CHẤM CÔNG & ĐI MUỘN (ATTENDANCE & LATE ARRIVAL - RẤT QUAN TRỌNG):**
    - **Câu hỏi: "Chấm công hôm X của nhân viên Y?"** (Hỏi dữ liệu chấm công bình thường)
@@ -646,6 +678,30 @@ SCHEMA CHI TIẾT:
 import pandas as pd
 import re
 from langchain_core.prompts import PromptTemplate
+
+
+# ==========================================================
+# ROUTER: PHÂN LOẠI CÂU HỎI HRM_SQL vs STATIC_DOC
+# ==========================================================
+ROUTER_PROMPT = ChatPromptTemplate.from_template("""
+Bạn là bộ phân loại câu hỏi cho chatbot ICS.
+
+NHIỆM VỤ: Với mỗi câu hỏi, hãy trả lời duy nhất một từ trong 2 từ sau đây:
+- HRM_SQL  -> nếu câu hỏi thuộc về quản lý nhân sự, chấm công, lương, dự án, công việc, phép năm, hệ thống HRM nội bộ.
+- STATIC_DOC -> nếu câu hỏi thuộc về giới thiệu công ty ICS, sản phẩm, giải pháp, tiêu chuẩn, quy trình, ISO, khách hàng, case study, ví dụ triển khai, marketing.
+
+Quy tắc:
+- Nếu câu hỏi hỏi về nhân viên, phòng ban, dự án nội bộ, công việc, chấm công, phép năm, hệ thống HRM, lịch trình/sự kiện nội bộ (bảng `lich_trinh`) → chọn HRM_SQL.
+- Các câu hỏi có chứa từ "sự kiện", "su kien", "lịch trình", "lich trinh", "lịch họp", "lich hop" **luôn** thuộc phạm vi HRM_SQL (tra cứu lịch/sự kiện nội bộ), KHÔNG được chọn STATIC_DOC.
+- Nếu câu hỏi hỏi "ICS là ai", "ICS làm gì", sản phẩm/giải pháp ICS, tiêu chuẩn ISO 27001, VietGuard, Smart Dashboard, khách hàng, dự án đã triển khai cho khách → chọn STATIC_DOC.
+- Nếu mơ hồ nhưng có thể map được sang HRM → ƯU TIÊN HRM_SQL.
+
+CÂU HỎI: {question}
+
+Chỉ trả lời đúng MỘT từ: HRM_SQL hoặc STATIC_DOC.
+""")
+
+router_chain = ROUTER_PROMPT | llm_router | StrOutputParser()
 # Nhớ import các hàm tạo file chúng ta đã viết ở bước trước
 # from report_generator import create_word_report, create_pdf_report (hoặc để chung file cũng được)
 
@@ -786,18 +842,19 @@ Bạn là SQL Generation Engine. Nhiệm vụ: Chuyển câu hỏi thành SQL Se
    - Ví dụ SAI: "Liệt kê dự án trễ hạn" → SELECT ten_du_an (thiếu ngày, trạng thái)
 6. Ngoài lề:
 - Chỉ trả về "NO_DATA" nếu:
-  a) Câu hỏi hoàn toàn KHÔNG liên quan đến HRM / Dự án / Nhân sự
+  a) Câu hỏi hoàn toàn KHÔNG liên quan đến HRM / Dự án / Nhân sự / Sự kiện nội bộ
   b) Không ánh xạ được tới BẤT KỲ bảng nào trong schema
-- Nếu câu hỏi còn mơ hồ nhưng có khả năng liên quan,hãy suy luận hợp lý nhất và sinh SQL an toàn.
+- Tuyệt đối KHÔNG trả về "NO_DATA" cho các câu hỏi có chứa từ khóa "sự kiện", "su kien", "lịch trình", "lich trinh", "lịch họp", "lich hop" – đây là các câu hỏi thuộc phạm vi HRM, PHẢI dùng bảng `lich_trinh`.
+- Nếu câu hỏi còn mơ hồ nhưng có khả năng liên quan, hãy suy luận hợp lý nhất và sinh SQL an toàn.
 
 7. **⛔ LỌC KPI (CONFIDENTIAL - KHÔNG CÔNG KHAI):**
-   - Nếu câu hỏi chứa từ khóa: "KPI", "chỉ số hiệu suất", "performance", "target", "mục tiêu công ty", "kết quả kinh doanh"
+   - Nếu câu hỏi chứa từ khóa: "", "performance", "target", "kết quả kinh doanh"
    - Phải TỪNG VÀ KHÔNG SINH SQL
    - Trả về: "KPI_BLOCKED" (để backend xử lý thành: "Dữ liệu KPI là thông tin không công khai. Bạn có muốn hỏi về các vấn đề khác không?")
    - KHÔNG bao giờ cho phép query đó dù câu hỏi có hint rằng dữ liệu ở đâu
 
 8. **⛔ LỌC LỊCH SỬ NHÂN SỰ (CONFIDENTIAL - KHÔNG CÔNG KHAI):**
-   - Nếu câu hỏi chứa từ khóa: "lịch sử", "quá khứ", "công việc trước", "kinh nghiệm làm việc", "hồ sơ", "tiểu sử", "trước đây", "từng làm", "đã làm việc ở"
+   - Nếu câu hỏi chứa từ khóa: "lịch sử", "quá khứ", "công việc trước", "kinh nghiệm làm việc", "hồ sơ", "tiểu sử","từng làm", "đã làm việc ở"
    - Phải TỪNG VÀ KHÔNG SINH SQL
    - Trả về: "HISTORY_BLOCKED" (để backend xử lý thành: "Dữ liệu lịch sử nhân sự là thông tin không được công khai. Bạn có muốn hỏi về các vấn đề khác không?")
    - KHÔNG bao giờ cho phép query đó dù câu hỏi có hint rằng dữ liệu ở đâu
@@ -1010,6 +1067,8 @@ User: "Liệt kê những dự án đã hoàn thành trên 80%?"
   -> SQL: SELECT nv.ho_ten, dnp.ly_do FROM don_nghi_phep dnp JOIN nhanvien nv ON dnp.nhan_vien_id = nv.id WHERE CURRENT_DATE BETWEEN dnp.ngay_bat_dau AND dnp.ngay_ket_thuc AND dnp.trang_thai = 'da_duyet'
 - User: "Nguyễn Tấn Dũng còn bao nhiêu phép?"
   -> SQL: SELECT nv.ho_ten, np.ngay_phep_con_lai FROM ngay_phep_nam np JOIN nhanvien nv ON np.nhan_vien_id = nv.id WHERE nv.ho_ten LIKE '%Nguyễn Tấn Dũng%' AND np.nam = YEAR(CURRENT_DATE)
+- User: "Nhân viên Nguyễn Tấn Dũng thuộc phòng ban nào?"
+  -> SQL: SELECT nv.ho_ten, pb.ten_phong AS phong_ban FROM nhanvien nv JOIN phong_ban pb ON nv.phong_ban_id = pb.id WHERE nv.ho_ten LIKE '%Nguyễn Tấn Dũng%' AND nv.trang_thai_lam_viec != 'Nghỉ việc'
 - User: "Thông tin phép năm của nhân viên có id = 5"
   -> SQL: SELECT nv.ho_ten, np.tong_ngay_phep, np.ngay_phep_da_dung, np.ngay_phep_con_lai FROM ngay_phep_nam np JOIN nhanvien nv ON np.nhan_vien_id = nv.id WHERE nv.id = 5 AND np.nam = YEAR(CURRENT_DATE)
 - User: "Tổng phép của toàn công ty năm 2026?"
@@ -1132,16 +1191,18 @@ THÔNG TIN:
 - Dữ liệu nhận được: {data}
 
 ⚠️ **NHẬP CUỐI CÙNG - PHẢI ĐỌC TRƯỚC HẾT:**
-- Nếu dữ liệu là `[]` (empty list) hoặc `null` hoặc "None" → CHỈ nói "Không có [cái gì đó]", không suy luận lý do
+- Nếu dữ liệu là `[]` (empty list) hoặc `null` hoặc "None" → Hãy trả lời một câu đầy đủ, lịch sự (ví dụ: "Hiện tại không có [cái gì đó]."), không suy luận thêm lý do ẩn phía sau
 - Nếu dữ liệu có ít nhất 1 dòng → PHẢI liệt kê tất cả, không được tóm tắt
 
 YÊU CẦU TRẢ LỜI:
 
 1. Nếu dữ liệu KHÔNG rỗng (có ít nhất 1 dòng):
-   - **BẮT BUỘC LIỆT KÊ CHI TIẾT tất cả dòng dữ liệu**, KHÔNG ĐƯỢC tóm tắt
-   - Hiển thị tất cả cột từ SQL query
-   - Mỗi bản ghi phải có tên/ID + các thông tin khác đầy đủ
-   - Dùng dấu "-" hoặc bullet point cho từng mục
+  - Viết câu trả lời theo văn phong tự nhiên, đầy đủ, không quá cộc lốc.
+  - Có thể mở đầu bằng 1 câu tóm tắt ngắn (ví dụ: "Dưới đây là danh sách kết quả:"), sau đó liệt kê chi tiết.
+  - **BẮT BUỘC LIỆT KÊ CHI TIẾT tất cả dòng dữ liệu**, KHÔNG ĐƯỢC tóm tắt
+  - Hiển thị tất cả cột từ SQL query
+  - Mỗi bản ghi phải có tên/ID + các thông tin khác đầy đủ
+  - Dùng dấu "-" hoặc bullet point cho từng mục
    - **⚠️ CRITICAL: LIỆT KÊ TỪNG DÒNG MỘT - KHÔNG BỎ QUA DÒNG NÀO:**
      + Nếu SQL trả về 5 dòng → PHẢI in ra 5 dòng (không được chỉ in 2-3 dòng)
      + Nếu SQL trả về 20 dòng → PHẢI in ra 20 dòng (không được chỉ in 10 dòng)
@@ -1221,36 +1282,40 @@ YÊU CẦU TRẢ LỜI:
    - Khi dữ liệu là bảng phép năm (ngay_phep_nam), PHẢI group theo nhân viên.
    - Nếu có NHIỀU nhân viên (kết quả nhiều dòng) → Liệt kê từng nhân viên rõ ràng
    - Nếu có MỘT nhân viên (kết quả 1 dòng) → Trực tiếp hiển thị thông tin
-   
-   - **⚠️ VALIDATION LOGIC (BẮT BUỘC KIỂM TRA TRƯỚC):**
-     + Công thức: `tong_ngay_phep = ngay_phep_da_dung + ngay_phep_con_lai`
-     + Khi nhận dữ liệu → NGAY LẬP TỨC kiểm tra công thức này
-     + Nếu KHÔNG thỏa mãn → Dữ liệu LỖI, báo: "Dữ liệu phép năm không hợp lệ (tính toán không chính xác). Vui lòng kiểm tra lại hệ thống."
-     + Nếu thỏa mãn → Mới được hiển thị bình thường
-   
-   - **Ví dụ ĐÚNG (1 nhân viên - Thỏa công thức 12 = 3 + 9):**
-     Thông tin phép năm của Phạm Minh Thắng:
-     - Tổng ngày phép: 12 ngày
-     - Đã dùng: 3 ngày
-     - Còn lại: 9 ngày
-   
-   - **Ví dụ ĐÚNG (Nhiều nhân viên - Thỏa công thức):**
-     Phạm Minh Thắng:
-     - Tổng ngày phép: 12 ngày
-     - Đã dùng: 3 ngày
-     - Còn lại: 9 ngày
-     
-     Nguyễn Văn A:
-     - Tổng ngày phép: 12 ngày
-     - Đã dùng: 5 ngày
-     - Còn lại: 7 ngày
-   
-   - **Ví dụ SAI (KHÔNG trả lời - báo lỗi dữ liệu):**
-     - Tổng: 2, Đã dùng: 3, Còn lại: 2 (Vì 2 ≠ 3 + 2 = 5)
-     - Không được hiển thị, phải báo: "Dữ liệu phép năm không hợp lệ"
+   - Ý nghĩa các trường phổ biến:
+     + `tong_ngay_phep`: tổng ngày phép hiện tại của nhân viên trong năm (do hệ thống tính, có thể đã bao gồm phép năm trước hoặc cộng đầu năm).
+     + `ngay_phep_da_dung`: số ngày phép đã sử dụng.
+     + `ngay_phep_con_lai`: số ngày phép còn lại (nếu có cột này trong dữ liệu).
+     + Có thể tồn tại thêm các trường khác như `ngay_phep_nam_truoc`, `da_cong_phep_dau_nam`, ... → chỉ cần đọc đúng giá trị.
+   - KHÔNG tự đặt công thức cứng giữa các cột. Hãy coi các con số trong dữ liệu là sự thật hệ thống và trình bày lại cho người dùng (tổng, đã dùng, còn lại, phép năm trước, v.v.) theo đúng ý nghĩa trường.
 
 GIỌNG ĐIỆU:
 Tự nhiên, thân thiện, chuyên nghiệp, giống trợ lý nội bộ doanh nghiệp.
+
+TRẢ LỜI:
+""")
+
+
+# --- PROMPT 3: TRẢ LỜI TỪ TÀI LIỆU TĨNH (STATIC DOCX RAG) ---
+STATIC_ANSWER_PROMPT = ChatPromptTemplate.from_template("""
+Bạn là trợ lý tư vấn giải pháp nội bộ của ICS.
+Nhiệm vụ: Trả lời câu hỏi dựa trên NỘI DUNG TÀI LIỆU dưới đây.
+
+VĂN BẢN THAM KHẢO (trích từ tài liệu nội bộ):
+{context}
+
+CÂU HỎI:
+{question}
+
+YÊU CẦU:
+- Chỉ sử dụng thông tin có trong văn bản tham khảo ở trên.
+- Không bịa thêm, không suy luận ngoài nội dung tài liệu.
+- Trả lời chi tiết, rõ ràng, bao quát đầy đủ các ý liên quan đến câu hỏi.
+- Có thể dùng nhiều câu hoặc gạch đầu dòng nếu cần, không tự ý rút gọn hay lược bỏ các ý quan trọng trong tài liệu.
+- Không lặp lại nguyên văn toàn bộ đoạn văn rất dài; chỉ tóm tắt phần liên quan nhưng vẫn giữ đủ nội dung cần thiết để người đọc hiểu rõ.
+- Nếu trong tài liệu KHÔNG có thông tin để trả lời → nói rõ: "Tôi chưa có dữ lieu cho nội dung bạn vừa đề cập. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý nhân sự (HRM) bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?".
+ - Tuyệt đối KHÔNG dùng Markdown in đậm (**), không bao quanh tiêu đề hoặc cụm từ bằng cặp ** ở hai bên.
+ - Chỉ trả lời bằng văn bản thường; nếu cần nhấn mạnh có thể dùng câu chữ, không dùng định dạng Markdown.
 
 TRẢ LỜI:
 """)
@@ -1326,8 +1391,9 @@ def execute_sql_api(sql: str) -> Any:
 def validate_leave_balance_data(data_result: Any) -> tuple[bool, str]:
     """
     Validate dữ liệu phép năm (ngay_phep_nam).
-    Công thức bắt buộc: tong_ngay_phep = ngay_phep_da_dung + ngay_phep_con_lai
-    Returns: (is_valid, error_message)
+  Công thức tham chiếu: tong_ngay_phep ≈ ngay_phep_da_dung + ngay_phep_con_lai
+  LƯU Ý: Hiện tại chỉ cảnh báo (log) nếu lệch, KHÔNG chặn trả lời.
+  Returns: (is_valid, error_message)
     """
     if not data_result or isinstance(data_result, str):
         return (True, "")  # Không validate nếu không có dữ liệu
@@ -1342,10 +1408,10 @@ def validate_leave_balance_data(data_result: Any) -> tuple[bool, str]:
                         used = float(record.get('ngay_phep_da_dung', 0))
                         remaining = float(record.get('ngay_phep_con_lai', 0))
                         
-                        # Kiểm tra công thức
+                        # Kiểm tra công thức (soft check - chỉ cảnh báo, không chặn)
                         expected_total = used + remaining
                         if abs(total - expected_total) > 0.01:  # Cho phép sai số 0.01
-                            return (False, f"Dữ liệu phép năm không hợp lệ (Tổng: {total} ≠ Đã dùng {used} + Còn lại {remaining} = {expected_total}). Vui lòng kiểm tra lại hệ thống.")
+                          print(f"[WARN] Dữ liệu phép năm có thể không hợp lệ (Tổng: {total} ≠ Đã dùng {used} + Còn lại {remaining} = {expected_total}).")
         
         # Nếu là single dict
         elif isinstance(data_result, dict):
@@ -1356,7 +1422,7 @@ def validate_leave_balance_data(data_result: Any) -> tuple[bool, str]:
                 
                 expected_total = used + remaining
                 if abs(total - expected_total) > 0.01:
-                    return (False, f"Dữ liệu phép năm không hợp lệ (Tổng: {total} ≠ Đã dùng {used} + Còn lại {remaining} = {expected_total}). Vui lòng kiểm tra lại hệ thống.")
+                  print(f"[WARN] Dữ liệu phép năm có thể không hợp lệ (Tổng: {total} ≠ Đã dùng {used} + Còn lại {remaining} = {expected_total}).")
         
         return (True, "")
     except Exception as e:
@@ -1403,24 +1469,24 @@ async def chat_endpoint(req: ChatRequest):
             )
         
         # KIỂM TRA TRƯỚC: Câu hỏi về lương (dữ liệu nhạy cảm)
-        salary_keywords = ['lương', 'thưởng', 'thù lao', 'mức lương', 'tiền lương', 'hệ số lương', 'lương cơ bản', 'phụ cấp', 'khoan trừ', 'thực linh']
+        salary_keywords = ['lương', 'mức lương', 'tiền lương', 'hệ số lương', 'lương cơ bản']
         
         if any(keyword in question_lower for keyword in salary_keywords):
             return ChatResponse(
                 sql=None,
                 data=None,
-                answer="Dữ liệu lương là thông tin cá nhân và nhạy cảm, không được công khai. Tôi không thể truy vấn thông tin này.",
+                answer="Dữ liệu lương là thông tin cá nhân và nhạy cảm, không được công khai. Tôi không thể truy vấn thông tin này. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý nhân sự (HRM) bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
                 download_url=None
             )
         
         # KIỂM TRA TRƯỚC: Câu hỏi về KPI (dữ liệu không công khai)
-        kpi_keywords = ['kpi', 'chỉ số hiệu suất', 'performance', 'target', 'mục tiêu công ty', 'kết quả kinh doanh', 'chỉ số', 'hiệu suất', 'mục tiêu']
+        kpi_keywords = ['kpi', 'performance', 'target']
         
         if any(keyword in question_lower for keyword in kpi_keywords):
             return ChatResponse(
                 sql=None,
                 data=None,
-                answer="Dữ liệu KPI là thông tin không công khai. Bạn có muốn hỏi về các vấn đề khác không?",
+                answer="Dữ liệu KPI là thông tin không công khai. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý nhân sự (HRM) bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
                 download_url=None
             )
         
@@ -1431,11 +1497,43 @@ async def chat_endpoint(req: ChatRequest):
             return ChatResponse(
                 sql=None,
                 data=None,
-                answer="Dữ liệu lịch sử nhân sự là thông tin không được công khai. Bạn có muốn hỏi về các vấn đề khác không?",
+                answer="Dữ liệu lịch sử nhân sự là thông tin không được công khai. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý nhân sự (HRM) bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
                 download_url=None
             )
-        
-        
+
+        # ROUTER: quyết định ưu tiên HRM_SQL hay STATIC_DOC
+        route = "HRM_SQL"
+        try:
+          route_raw = router_chain.invoke({"question": req.question})
+          route = (route_raw or "").strip().upper()
+        except Exception as e:
+          print(f"[Router] error: {e}")
+          route = "HRM_SQL"
+
+        if route not in ("HRM_SQL", "STATIC_DOC"):
+          route = "HRM_SQL"
+
+        # Nếu router chọn STATIC_DOC → bỏ qua SQL, trả lời từ tài liệu tĩnh
+        if route == "STATIC_DOC":
+          static_context = build_static_context(req.question, k=3)
+          if static_context:
+            static_chain = STATIC_ANSWER_PROMPT | llm_answer | StrOutputParser()
+            static_answer = static_chain.invoke({
+              "question": req.question,
+              "context": static_context,
+            })
+            # Làm sạch Markdown in đậm nếu vẫn còn
+            if isinstance(static_answer, str):
+                static_answer = static_answer.replace("**", "")
+            return ChatResponse(sql=None, data=None, answer=static_answer, download_url=None)
+          # Không tìm được gì trong tài liệu tĩnh
+          return ChatResponse(
+            sql=None,
+            data=None,
+            answer="Tôi chưa có dữ lieu cho nội dung bạn vừa đề cập. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý nhân sự (HRM) bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
+            download_url=None,
+          )
+
         # KIỂM TRA TRƯỚC: Câu hỏi về chấm công/đi muộn ngày tương lai
         from datetime import datetime, timedelta
         import re
@@ -1484,13 +1582,59 @@ async def chat_endpoint(req: ChatRequest):
         })
         sql = validate_sql(raw_sql)
 
-        # Nếu AI phát hiện câu hỏi ngoài lề (thời tiết, bóng đá...)
+        # Xử lý riêng trường hợp AI trả về NO_DATA
         if "NO_DATA" in sql:
-            return ChatResponse(
+          ql = question_lower
+
+          # 6.1. Nếu là câu hỏi về SỰ KIỆN/LỊCH TRÌNH → TỰ XÂY DỰNG SQL TRÊN BẢNG `lich_trinh`
+          if any(kw in ql for kw in ["sự kiện", "su kien", "lịch trình", "lich trinh", "lịch họp", "lich hop"]):
+            import re
+
+            # Mặc định: liệt kê tất cả sự kiện, sắp xếp theo ngày bắt đầu mới nhất
+            event_sql = "SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc, ngay_tao FROM lich_trinh ORDER BY ngay_bat_dau DESC"
+
+            # Nếu câu hỏi chỉ rõ tháng/năm tạo, ví dụ: "tháng 11/2025"
+            month_year_match = re.search(r"tháng\s+(\d{1,2})\s*/\s*(\d{4})", ql)
+            if month_year_match:
+              month = int(month_year_match.group(1))
+              year = int(month_year_match.group(2))
+              event_sql = (
+                "SELECT tieu_de, mo_ta, ngay_bat_dau, ngay_ket_thuc, ngay_tao "
+                "FROM lich_trinh "
+                f"WHERE MONTH(ngay_tao) = {month} AND YEAR(ngay_tao) = {year} "
+                "ORDER BY ngay_bat_dau DESC"
+              )
+
+            sql = event_sql
+
+          else:
+            # Nếu thực sự ngoài phạm vi HRM → thử trả lời từ tài liệu tĩnh (DOCX RAG)
+            static_context = build_static_context(req.question, k=3)
+
+            if static_context:
+              static_chain = STATIC_ANSWER_PROMPT | llm_answer | StrOutputParser()
+              static_answer = static_chain.invoke({
+                "question": req.question,
+                "context": static_context,
+              })
+
+              # Làm sạch Markdown in đậm nếu vẫn còn
+              if isinstance(static_answer, str):
+                  static_answer = static_answer.replace("**", "")
+
+              return ChatResponse(
                 sql=None,
                 data=None,
-                answer="Tôi chưa có dữ liệu cho nội dung bạn vừa đề cập. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý Nhân sự (HRM), bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
-                download_url=None
+                answer=static_answer,
+                download_url=None,
+              )
+
+            # Nếu không có tài liệu tĩnh phù hợp → trả lời như trước
+            return ChatResponse(
+              sql=None,
+              data=None,
+              answer="Tôi chưa có dữ liệu cho nội dung bạn vừa đề cập. Hệ thống Chatbot hiện hỗ trợ tra cứu và báo cáo dữ liệu Quản lý Nhân sự (HRM), bao gồm: nhân sự, tiến độ dự án, công việc. Bạn muốn tìm hiểu thêm về chúng không?",
+              download_url=None,
             )
         
         # Nếu câu hỏi liên quan đến KPI (dữ liệu không công khai)
@@ -1507,7 +1651,7 @@ async def chat_endpoint(req: ChatRequest):
             return ChatResponse(
                 sql=None,
                 data=None,
-                answer="Dữ liệu lịch sử nhân sự là thông tin không được công khai. Bạn có muốn hỏi về các vấn đề khác không?",
+                answer="",
                 download_url=None
             )
 
@@ -1534,27 +1678,209 @@ async def chat_endpoint(req: ChatRequest):
             
             # BƯỚC 3: SINH CÂU TRẢ LỜI
             if isinstance(data_result, str) and "Lỗi" in data_result:
-                final_answer = f"⚠️ {data_result}"
+              final_answer = f"⚠️ {data_result}"
             else:
+              import json
+
+              handled_directly = False
+
+              # 3.1. Trường hợp đặc biệt: câu hỏi về "đi muộn" dạng liệt kê ("ai đi muộn")
+              # Không áp dụng cho các câu hỏi thống kê tổng số / bao nhiêu / số lần
+              is_late_question = "đi muộn" in question_lower
+              is_aggregate_late = any(
+                kw in question_lower
+                for kw in [
+                  "tổng",
+                  "tổng số",
+                  "bao nhiêu",
+                  "bao nhieu",
+                  "số lần",
+                  "so lan",
+                  "lần",
+                  "lan",
+                ]
+              )
+
+              if is_late_question and not is_aggregate_late:
+                rows = []
+                if isinstance(data_result, dict) and 'data' in data_result:
+                  rows = data_result.get('data') or []
+                elif isinstance(data_result, list):
+                  rows = data_result
+
+                if isinstance(rows, list) and rows:
+                  # Chỉ in danh sách từng nhân viên, không cần dòng tiêu đề tổng quát
+                  lines = []
+                  for record in rows:
+                    if isinstance(record, dict):
+                      name = record.get('ho_ten') or record.get('ten_nhan_vien') or record.get('nhan_vien') or ""
+                      emp_id = record.get('nhan_vien_id') or record.get('id_nhan_vien')
+                      date = record.get('ngay_cham_cong') or record.get('ngay') or ""
+                      check_in = record.get('check_in') or record.get('gio_vao') or ""
+                      check_out = record.get('check_out') or record.get('gio_ra') or ""
+
+                      parts = []
+                      if name:
+                        if emp_id is not None:
+                          parts.append(f"{name} (ID: {emp_id})")
+                        else:
+                          parts.append(name)
+                      elif emp_id is not None:
+                        parts.append(f"Nhân viên ID {emp_id}")
+
+                      if date:
+                        parts.append(f"ngày {date}")
+                      if check_in:
+                        parts.append(f"check in {check_in}")
+                      if check_out:
+                        parts.append(f"check out {check_out}")
+
+                      if parts:
+                        line = "- " + ", ".join(parts)
+                      else:
+                        line = "- " + json.dumps(record, ensure_ascii=False)
+                    else:
+                      line = "- " + str(record)
+                    lines.append(line)
+
+                  final_answer = "\n".join(lines)
+                  handled_directly = True
+
+              # 3.2. Trường hợp dữ liệu thống kê COUNT/SUM/AVG đơn giản → trả câu tự nhiên, không in JSON
+              if not handled_directly:
+                rows = None
+                if isinstance(data_result, dict) and 'data' in data_result:
+                  rows = data_result.get('data')
+                elif isinstance(data_result, list):
+                  rows = data_result
+
+                if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict):
+                  record = rows[0]
+                  # Nếu chỉ có 1 field numeric → coi là kết quả thống kê đơn giản
+                  numeric_items = [
+                    (k, v) for k, v in record.items()
+                    if isinstance(v, (int, float))
+                  ]
+                  if len(numeric_items) == 1:
+                    key, value = numeric_items[0]
+                    # Trả câu tự nhiên hơn cho các câu hỏi thống kê số lượng
+                    ql = question_lower
+                    object_label = "mục"
+                    # Ưu tiên loại đối tượng được hỏi đến trực tiếp
+                    # Nếu câu hỏi nói về "bước" (các bước trong quy trình) → dùng "bước"
+                    if "bước" in ql or "buoc" in ql:
+                      object_label = "bước"
+                    # Nếu câu hỏi nói về "công việc" → dùng "công việc"
+                    elif "công việc" in ql or "cong viec" in ql:
+                      object_label = "công việc"
+                    # Nếu câu hỏi nói về "nhân viên" → dùng "nhân viên"
+                    elif "nhân viên" in ql or "nhan vien" in ql:
+                      object_label = "nhân viên"
+                    # Nếu câu hỏi nói về "dự án" → dùng "dự án"
+                    elif "dự án" in ql or "du an" in ql:
+                      object_label = "dự án"
+                    elif "tài liệu" in ql or "tai lieu" in ql:
+                      object_label = "tài liệu"
+                    elif "sự kiện" in ql or "su kien" in ql:
+                      object_label = "sự kiện"
+                    elif "phòng ban" in ql or "phong ban" in ql:
+                      object_label = "phòng ban"
+                    elif "quyền" in ql or "quyen" in ql:
+                      object_label = "quyền"
+
+                    # Nếu câu hỏi nói về "số lần" thì label là "lần"
+                    if "lần" in ql or "lan" in ql:
+                      object_label = "lần"
+
+                    # Nếu record có thêm tên công việc/dự án, ưu tiên trả lời kèm tên
+                    name_field = record.get("ten_cong_viec") or record.get("ten_du_an") or record.get("ten")
+                    question_text = req.question.strip()
+                    q_lower_full = question_text.lower()
+
+                    # 1) Câu hỏi dạng "Có bao nhiêu ...?" → "Có X ..."
+                    if q_lower_full.startswith("có bao nhiêu") or q_lower_full.startswith("co bao nhieu"):
+                      if q_lower_full.startswith("có bao nhiêu"):
+                        prefix_len = len("có bao nhiêu")
+                      else:
+                        prefix_len = len("co bao nhieu")
+
+                      suffix = question_text[prefix_len:].lstrip(" ,.:-")
+                      suffix = suffix.rstrip(" ?!.")
+                      if suffix:
+                        final_answer = f"Có {value} {suffix}."
+                      else:
+                        final_answer = f"Có {value} {object_label}."
+
+                    # 2) Câu hỏi dạng "Tổng số ..." → "Tổng số ... là X <label>."
+                    elif q_lower_full.startswith("tổng số") or q_lower_full.startswith("tong so"):
+                      base_q = question_text.rstrip(" ?!.")
+                      final_answer = f"{base_q} là {value} {object_label}."
+
+                    # 3) Câu hỏi dạng "X nào ... nhiều nhất" với tên + số lượng → nêu rõ tên
+                    elif ("nào" in ql or "nao" in ql) and name_field and ("nhiều nhất" in ql or "nhieu nhat" in ql):
+                      # Ví dụ: "Công việc nào có nhân viên thực hiện nhiều nhất?"
+                      final_answer = f"Công việc {name_field} có {value} {object_label}."
+
+                    # 4) Mặc định: giữ câu ngắn gọn
+                    else:
+                      final_answer = f"Có {value} {object_label}."
+                    handled_directly = True
+
+              # 3.3. Mặc định: gửi cho LLM format theo ANSWER_PROMPT
+              if not handled_directly:
                 # Convert data thành JSON string rõ ràng để LLM dễ parse
-                import json
                 if data_result is None:
-                    data_str = "null"
+                  data_str = "null"
                 elif isinstance(data_result, str):
-                    data_str = data_result
+                  data_str = data_result
                 elif isinstance(data_result, dict) and 'data' in data_result:
-                    # Nếu API return {data: [...], success: true}
-                    data_str = json.dumps(data_result['data'], ensure_ascii=False)
+                  data_str = json.dumps(data_result['data'], ensure_ascii=False)
                 else:
-                    data_str = json.dumps(data_result, ensure_ascii=False)
-                
-                # Gửi cả Data rỗng cho AI để nó "chém gió" dựa trên Prompt mới
-                # Dùng llm_answer (có max_tokens=4000) để hỗ trợ danh sách dài
+                  data_str = json.dumps(data_result, ensure_ascii=False)
+
                 ans_chain = ANSWER_PROMPT | llm_answer | StrOutputParser()
                 final_answer = ans_chain.invoke({
-                    "question": req.question,
-                    "data": data_str
+                  "question": req.question,
+                  "data": data_str
                 })
+
+                # HẬU KIỂM ĐẶC BIỆT CHO CÂU HỎI "TRỄ HẠN":
+                # Nếu SQL đã trả về dữ liệu nhưng LLM vẫn trả lời "Không có dự án nào trễ hạn"
+                # thì override bằng cách liệt kê trực tiếp từ data_result.
+                if ("trễ hạn" in question_lower or "tre han" in question_lower) and data_result and not isinstance(data_result, str):
+                  rows = []
+                  if isinstance(data_result, dict) and 'data' in data_result:
+                    rows = data_result.get('data') or []
+                  elif isinstance(data_result, list):
+                    rows = data_result
+
+                  if isinstance(rows, list) and rows:
+                    text_lower = final_answer.lower() if isinstance(final_answer, str) else ""
+                    if "không có dự án nào trễ hạn" in text_lower:
+                      lines = []
+                      for record in rows:
+                        if isinstance(record, dict):
+                          name = record.get('ten_du_an') or record.get('ten_cong_viec') or record.get('ten') or record.get('tieu_de') or ""
+                          end_date = record.get('ngay_ket_thuc') or record.get('han_hoan_thanh') or ""
+                          status = record.get('trang_thai_duan') or record.get('trang_thai') or ""
+
+                          parts = []
+                          if name:
+                            parts.append(name)
+                          if end_date:
+                            parts.append(f"ngày kết thúc {end_date}")
+                          if status:
+                            parts.append(f"trạng thái {status}")
+
+                          if parts:
+                            line = "- " + ", ".join(parts)
+                          else:
+                            line = "- " + json.dumps(record, ensure_ascii=False)
+                        else:
+                          line = "- " + str(record)
+                        lines.append(line)
+
+                      final_answer = "\n".join(lines)
             
             # BƯỚC 4: KIỂM TRA YÊU CẦU XUẤT FILE (sau khi có câu trả lời)
             q_lower = req.question.lower()

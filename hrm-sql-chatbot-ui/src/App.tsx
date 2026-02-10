@@ -16,9 +16,9 @@ interface Message {
 }
 
 const suggestedQuestions = [
-  "Danh sách dự án trễ hạn?",
+  "ICS là gì?",
   "Danh sách phòng ban?",
-  "Ai đi muộn hôm nay",
+  "Danh sách dự án trễ hạn?",
   "Công việc nào chưa xong?",
 ];
 
@@ -305,7 +305,7 @@ export default function App() {
                 <div className="card-icon">📅</div>
                 <div className="card-content">
                   <h4>Thành lập</h4>
-                  <p>03/2020</p>
+                  <p>2021</p>
                 </div>
               </div>
               
@@ -321,7 +321,7 @@ export default function App() {
                 <div className="card-icon">🚀</div>
                 <div className="card-content">
                   <h4>Sản phẩm</h4>
-                  <p>VietGuard, AI SOC, SmartDashboard, CSA</p>
+                  <p>VietGuard, AI SOC, SmartDashboard, Oracle Cloud</p>
                 </div>
               </div>
             </div>
